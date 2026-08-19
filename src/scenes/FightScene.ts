@@ -63,6 +63,9 @@ export class FightScene extends Phaser.Scene {
   /** Guards against replaying the same ROUND_START announcement. */
   private announcedRound = 0;
 
+  private syncWatchdog: number | null = null;
+  private lastProgressAt = 0;
+
   private localRematch = false;
   private remoteRematch = false;
   private rematchPrompt?: Phaser.GameObjects.Text;
@@ -104,7 +107,11 @@ export class FightScene extends Phaser.Scene {
     this.lastLocalHitAt = 0;
     this.announcedRound = 0;
 
-    DomUI.getInstance().showCameraPip(gm.vision.camera.state === 'READY');
+    const dom = DomUI.getInstance();
+    dom.showCameraPip(gm.vision.camera.state === 'READY');
+    // During the fight the preview moves to a small strip under the P2 HUD so
+    // it never covers the arena floor where the fighters actually are.
+    dom.setCameraPipCompact(true);
 
     // 1. Stage
     this.add.image(320, 180, 'stage_sky').setScrollFactor(0.2);
@@ -145,7 +152,33 @@ export class FightScene extends Phaser.Scene {
       this.unsubscribers.forEach((off) => off());
       this.unsubscribers = [];
       this.roundTimerEvent?.remove();
+      DomUI.getInstance().setCameraPipCompact(false);
+      if (this.syncWatchdog !== null) {
+        window.clearInterval(this.syncWatchdog);
+        this.syncWatchdog = null;
+      }
     });
+
+    // Follower watchdog: if PLAYER 1's ROUND_START never arrives (all three
+    // packets lost, or we joined the scene late), ask for the current state
+    // instead of waiting forever on the announcer text.
+    if (gm.isOnline && !gm.isMatchAuthority) {
+      this.lastProgressAt = Date.now();
+      this.syncWatchdog = window.setInterval(() => {
+        const stuck =
+          !this.isRoundActive &&
+          gm.currentState !== GameState.FIGHT_MATCH_END &&
+          Date.now() - this.lastProgressAt > 3500;
+        if (stuck && gm.room.slot) {
+          gm.room.sendMatch({
+            type: 'MATCH',
+            playerId: gm.room.slot,
+            timestamp: Date.now(),
+            kind: 'NEED_STATE'
+          });
+        }
+      }, 1800);
+    }
 
     // 7. Round 1.
     // PLAYER 1 waits a beat before announcing: PLAYER 2 reaches this scene a
@@ -266,11 +299,24 @@ export class FightScene extends Phaser.Scene {
 
     switch (msg.kind) {
       case 'ROUND_START':
+        this.lastProgressAt = Date.now();
         gm.applyAuthoritativeScore(msg.p1Wins ?? 0, msg.p2Wins ?? 0, msg.round ?? 1);
         this.startRoundSequence(msg.round ?? 1);
         break;
 
+      case 'NEED_STATE':
+        // The other laptop missed the round announcement - re-send it.
+        if (gm.isMatchAuthority) {
+          this.broadcastMatch('ROUND_START', {
+            round: gm.currentRound,
+            p1Wins: gm.p1RoundWins,
+            p2Wins: gm.p2RoundWins
+          });
+        }
+        break;
+
       case 'TIMER':
+        this.lastProgressAt = Date.now();
         this.roundTimer = msg.secondsLeft ?? this.roundTimer;
         this.timerText.setText(`${Math.max(0, this.roundTimer)}`);
         break;

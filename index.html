@@ -109,6 +109,30 @@
       line-height: 1.15;
     }
 
+    /* Fight mode: a small strip pinned top-right, under the P2 health bar,
+       clear of the arena floor. */
+    #camera-pip.compact {
+      top: 118px;
+      right: 10px;
+      bottom: auto;
+      width: 138px;
+    }
+
+    #camera-pip.compact .pip-title {
+      font-size: 7px;
+      padding: 4px 6px 3px;
+    }
+
+    #camera-pip.compact .pip-stage { height: 92px; }
+
+    #camera-pip.compact .pip-status {
+      font-size: 13px;
+      gap: 1px;
+      padding: 4px 6px 5px;
+    }
+
+    #camera-pip.compact #gesture-status { display: none; }
+
     .status-ok { color: #4dff9f; }
     .status-bad { color: #ff5f7a; }
     .status-idle { color: #8a8aa8; }

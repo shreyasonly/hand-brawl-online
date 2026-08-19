@@ -148,6 +148,14 @@ export class LobbyScene extends Phaser.Scene {
 
     this.unsubscribers.push(
       gm.room.events.on('presence', (snapshot) => this.renderPresence(snapshot)),
+      gm.room.events.on('lobby', () => {
+        // Their 1s lobby keepalive reached us: the opponent is in the room,
+        // even if we never saw their presence join. Move on.
+        if (!gm.room.slot) return;
+        this.statusText.setColor('#4dff9f');
+        this.statusText.setText('BOTH PLAYERS CONNECTED - STARTING CAMERA SETUP...');
+        this.advance();
+      }),
       gm.room.events.on('connection', (status) =>
         dom.updateNetBadge(status, gm.room.roomCode, gm.room.slot)
       ),

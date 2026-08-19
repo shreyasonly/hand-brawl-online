@@ -101,6 +101,8 @@ export class RoomSession {
   private joinedAt = 0;
   private meta: PresenceMeta;
   private hasSubscribedOnce = false;
+  /** Serialized form of the last successfully tracked meta (change detection). */
+  private lastTrackedMeta = '';
   /** True once the player actively picked a fighter, so we stop defaulting. */
   private characterPickedByPlayer = false;
 
@@ -234,6 +236,7 @@ export class RoomSession {
     this.hasSubscribedOnce = false;
     this.meta = { ...this.meta, slot: null, ready: false };
     this.characterPickedByPlayer = false;
+    this.lastTrackedMeta = '';
     this.setStatus('OFFLINE');
   }
 
@@ -257,21 +260,37 @@ export class RoomSession {
     faceDetected: boolean;
     handDetected: boolean;
   }): Promise<void> {
-    const changed =
-      this.meta.cameraEnabled !== status.cameraEnabled ||
-      this.meta.faceDetected !== status.faceDetected ||
-      this.meta.handDetected !== status.handDetected;
-    if (!changed) return;
-
     this.meta.cameraEnabled = status.cameraEnabled;
     this.meta.faceDetected = status.faceDetected;
     this.meta.handDetected = status.handDetected;
+    // Deliberately re-announced even when nothing changed: this doubles as the
+    // keepalive that repairs the opponent's view after a lost presence diff or
+    // a channel reconnect. Without it, state that missed its one delivery
+    // window stayed wrong forever.
+    await this.syncLobbyState();
+  }
+
+  /**
+   * Re-publish this client's lobby state (presence + LOBBY broadcast).
+   * Called on a slow timer while waiting in the lobby, so a single dropped
+   * realtime packet can never deadlock the ready handshake.
+   */
+  public async announceLobbyState(): Promise<void> {
     await this.syncLobbyState();
   }
 
   private async syncLobbyState(): Promise<void> {
     if (!this.channel || !this.slot) return;
-    await this.trackPresence();
+
+    // Presence writes are expensive (fanned out to every subscriber and rate
+    // limited server-side) - only track when the meta actually changed.
+    // The LOBBY broadcast below is cheap and is sent EVERY time; it is the
+    // 1s keepalive that heals lost packets on the other side.
+    const serialized = JSON.stringify(this.meta);
+    if (serialized !== this.lastTrackedMeta) {
+      this.lastTrackedMeta = serialized;
+      await this.trackPresence();
+    }
 
     const msg: LobbyMessage = {
       type: 'LOBBY',
@@ -339,6 +358,7 @@ export class RoomSession {
     this.joinedAt = Date.now();
     this.meta = { ...this.meta, joinedAt: this.joinedAt, slot: null, ready: false };
     this.hasSubscribedOnce = false;
+    this.lastTrackedMeta = '';
 
     const channel = supabase.channel(channelNameFor(roomCode), {
       config: {
@@ -380,7 +400,9 @@ export class RoomSession {
       channel.subscribe((status) => {
         if (status === 'SUBSCRIBED') {
           if (this.hasSubscribedOnce) {
-            // We dropped and came back - restore our presence entry.
+            // We dropped and came back - the server forgot our presence entry,
+            // so bypass the change-cache and re-track unconditionally.
+            this.lastTrackedMeta = JSON.stringify(this.meta);
             void this.trackPresence();
           }
           this.hasSubscribedOnce = true;
@@ -404,9 +426,13 @@ export class RoomSession {
     event: K
   ): void {
     if (!payload || !payload.playerId) return;
-    // broadcast self:false already filters our own messages; this guards against
-    // a stale slot echo right after a re-assignment.
-    if (this.slot && payload.playerId === this.slot) return;
+    // broadcast self:false means everything we receive is from the other
+    // client. If it carries OUR slot, the two clients somehow claimed the same
+    // slot - drop it (applying it would drive the wrong fighter) and shout.
+    if (this.slot && payload.playerId === this.slot) {
+      console.error('SLOT CONFLICT: opponent message arrived with our own slot', this.slot, payload);
+      return;
+    }
     this.events.emit(event, payload as RoomEvents[K]);
   }
 
@@ -438,16 +464,12 @@ export class RoomSession {
 
   private onPresenceSync(): void {
     if (!this.channel) return;
-    const members = this.readMembers();
-
-    // Re-derive slots from the shared presence state so both browsers agree.
-    if (this.slot) {
-      const myIndex = members.findIndex((m) => m.clientId === this.clientId);
-      if (myIndex === 0 && this.slot !== 'p1') this.assignSlot('p1');
-      else if (myIndex === 1 && this.slot !== 'p2') this.assignSlot('p2');
-    }
-
-    this.publishSnapshot(members);
+    // Slots are STICKY: assigned exactly once when the room is created/joined
+    // (first player = p1, second = p2) and never re-derived. Presence flaps -
+    // a briefly missing entry after a lost diff or a reconnect - must not move
+    // a player into the other slot, or both clients end up filtering each
+    // other's messages as their own.
+    this.publishSnapshot(this.readMembers());
   }
 
   private publishSnapshot(preloaded?: PresenceMeta[]): void {

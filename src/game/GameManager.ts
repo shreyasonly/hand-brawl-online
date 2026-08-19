@@ -133,6 +133,10 @@ export class GameManager {
   /**
    * Publishes only booleans - "camera on / face seen / hand seen" - so the
    * other laptop can show a readiness readout. No imagery, ever.
+   *
+   * Runs on a 1s beat for the whole online session and re-announces even when
+   * nothing changed: the repeat is what heals lost presence diffs, dropped
+   * LOBBY packets and channel reconnects.
    */
   public startPresenceHeartbeat(): void {
     if (this.presenceTimer !== null) return;
@@ -144,7 +148,7 @@ export class GameManager {
         faceDetected: status.faceDetected,
         handDetected: status.handDetected
       });
-    }, 700);
+    }, 1000);
   }
 
   public stopPresenceHeartbeat(): void {

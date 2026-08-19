@@ -44,6 +44,10 @@ export class SelectScene extends Phaser.Scene {
 
   private localReady = false;
   private launching = false;
+  /** Opponent readiness as last reported by a LOBBY broadcast. Presence can lag
+   *  or lose a diff; the broadcast is the fast path and this is the memory. */
+  private remoteReadyBroadcast: boolean | null = null;
+  private retryTimer: number | null = null;
   private unsubscribers: Array<() => void> = [];
 
   constructor() {
@@ -55,6 +59,7 @@ export class SelectScene extends Phaser.Scene {
     gm.currentState = GameState.CHARACTER_SELECT;
     this.localReady = false;
     this.launching = false;
+    this.remoteReadyBroadcast = null;
 
     if (gm.mode === 'ONLINE') {
       // Start from whatever this player already published (defaults per slot).
@@ -155,13 +160,30 @@ export class SelectScene extends Phaser.Scene {
       this.scene.start('MenuScene');
     });
 
-    if (gm.mode === 'ONLINE') this.bindRoomEvents();
+    if (gm.mode === 'ONLINE') {
+      this.bindRoomEvents();
+
+      // Self-healing handshake, on a DOM timer so it keeps running even when
+      // the tab is backgrounded (Phaser clock freezes there). The heartbeat in
+      // GameManager already re-announces our lobby state every second; this
+      // beat re-reads what has arrived and re-checks the start condition, so a
+      // missed event can never leave both players stuck on READY.
+      this.retryTimer = window.setInterval(() => {
+        if (this.launching) return;
+        this.refresh();
+        this.tryStartOnlineMatch();
+      }, 1000);
+    }
 
     this.refresh();
 
     this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
       this.unsubscribers.forEach((off) => off());
       this.unsubscribers = [];
+      if (this.retryTimer !== null) {
+        window.clearInterval(this.retryTimer);
+        this.retryTimer = null;
+      }
     });
   }
 
@@ -252,10 +274,13 @@ export class SelectScene extends Phaser.Scene {
         this.tryStartOnlineMatch();
       }),
       gm.room.events.on('lobby', (msg) => {
-        // Fast path: apply the opponent's pick before presence catches up.
+        // Fast path: apply the opponent's pick AND ready state before presence
+        // catches up (broadcasts arrive seconds earlier than presence diffs).
         if (msg.playerId === 'p1') this.p1Selection = msg.character;
         if (msg.playerId === 'p2') this.p2Selection = msg.character;
+        this.remoteReadyBroadcast = msg.ready;
         this.refresh();
+        this.tryStartOnlineMatch();
       }),
       gm.room.events.on('match', (msg) => this.onMatchMessage(msg))
     );
@@ -279,9 +304,15 @@ export class SelectScene extends Phaser.Scene {
   private readyFlags(): { p1Ready: boolean; p2Ready: boolean } {
     const gm = GameManager.getInstance();
     const snapshot = gm.room.lastSnapshot;
+
+    // The opponent counts as ready when EITHER channel says so - presence can
+    // drop a diff, broadcasts can drop a packet, but both re-send every 1.5s.
+    const opponentMeta = gm.localIndex === 1 ? snapshot?.p2 : snapshot?.p1;
+    const opponentReady = (opponentMeta?.ready ?? false) || this.remoteReadyBroadcast === true;
+
     return {
-      p1Ready: gm.localIndex === 1 ? this.localReady : (snapshot?.p1?.ready ?? false),
-      p2Ready: gm.localIndex === 2 ? this.localReady : (snapshot?.p2?.ready ?? false)
+      p1Ready: gm.localIndex === 1 ? this.localReady : opponentReady,
+      p2Ready: gm.localIndex === 2 ? this.localReady : opponentReady
     };
   }
 
@@ -290,8 +321,11 @@ export class SelectScene extends Phaser.Scene {
     const gm = GameManager.getInstance();
     if (this.launching || !gm.isMatchAuthority) return;
 
+    // A LOBBY broadcast from the opponent proves they are in the room even if
+    // their presence entry is missing or stale.
     const snapshot = gm.room.lastSnapshot;
-    if (!snapshot?.p1 || !snapshot?.p2) return;
+    const opponentPresent = (snapshot?.opponentPresent ?? false) || this.remoteReadyBroadcast !== null;
+    if (!opponentPresent) return;
 
     const { p1Ready, p2Ready } = this.readyFlags();
     if (!p1Ready || !p2Ready) return;
@@ -305,13 +339,25 @@ export class SelectScene extends Phaser.Scene {
       p2Character: this.p2Selection
     };
 
+    // Three sends: a single dropped packet must not strand the other player in
+    // fighter select. launchMatch is idempotent on the receiving side.
     gm.room.sendMatch(message);
+    this.time.delayedCall(350, () => gm.room.sendMatch(message));
+    this.time.delayedCall(800, () => gm.room.sendMatch(message));
     this.launchMatch(this.p1Selection, this.p2Selection);
   }
 
   private onMatchMessage(msg: MatchMessage): void {
-    if (msg.kind !== 'START_MATCH') return;
-    this.launchMatch(msg.p1Character ?? this.p1Selection, msg.p2Character ?? this.p2Selection);
+    if (msg.kind === 'START_MATCH') {
+      this.launchMatch(msg.p1Character ?? this.p1Selection, msg.p2Character ?? this.p2Selection);
+      return;
+    }
+
+    // ROUND_START / TIMER while we are still in fighter select means the match
+    // began without us (every START_MATCH packet was lost). Catch up.
+    if (msg.kind === 'ROUND_START' || msg.kind === 'TIMER') {
+      this.launchMatch(this.p1Selection, this.p2Selection);
+    }
   }
 
   private launchMatch(p1: CharacterId, p2: CharacterId): void {
@@ -354,10 +400,15 @@ export class SelectScene extends Phaser.Scene {
       `PLAYER 2${gm.localIndex === 2 ? ' (YOU)' : ''}${p2Ready ? ' ✓' : ''}`
     );
 
-    const opponentPresent = snapshot?.opponentPresent ?? false;
+    const opponentPresent = (snapshot?.opponentPresent ?? false) || this.remoteReadyBroadcast !== null;
+    const opponentReady = gm.localIndex === 1 ? p2Ready : p1Ready;
+
     if (!opponentPresent) {
       this.statusText.setColor('#ff5f7a');
       this.statusText.setText('OPPONENT DISCONNECTED - WAITING FOR THEM TO COME BACK...');
+    } else if (this.localReady && opponentReady) {
+      this.statusText.setColor('#4dff9f');
+      this.statusText.setText('BOTH PLAYERS READY - STARTING THE MATCH...');
     } else if (this.localReady) {
       this.statusText.setColor('#4dff9f');
       this.statusText.setText('YOU ARE READY - WAITING FOR YOUR OPPONENT...');

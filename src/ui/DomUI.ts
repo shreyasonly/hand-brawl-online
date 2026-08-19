@@ -75,6 +75,14 @@ export class DomUI {
     this.pip?.classList.toggle('hidden', !visible);
   }
 
+  /**
+   * Compact mode for the fight: a small strip pinned top-right under the P2
+   * HUD, so the preview never covers the arena floor or the fighters.
+   */
+  public setCameraPipCompact(compact: boolean): void {
+    this.pip?.classList.toggle('compact', compact);
+  }
+
   public updateVisionStatus(status: VisionStatus): void {
     this.applyStatusLine(
       this.faceStatus,

@@ -29,6 +29,7 @@ export class SetupScene extends Phaser.Scene {
     gm.currentState = GameState.CAMERA_SETUP;
 
     const dom = DomUI.getInstance();
+    dom.setCameraPipCompact(false);
     dom.updateNetBadge(gm.room.status, gm.room.roomCode, gm.room.slot);
 
     this.add.image(320, 180, 'stage_sky');

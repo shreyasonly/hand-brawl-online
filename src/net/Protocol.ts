@@ -93,7 +93,9 @@ export type MatchMessageKind =
   | 'ROUND_END'
   | 'MATCH_END'
   | 'REMATCH_REQUEST'
-  | 'REMATCH_ACCEPT';
+  | 'REMATCH_ACCEPT'
+  /** Follower asking the authority to re-send the current round state. */
+  | 'NEED_STATE';
 
 export interface MatchMessage {
   type: 'MATCH';
