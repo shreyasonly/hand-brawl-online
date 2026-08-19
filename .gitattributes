@@ -1,0 +1,6 @@
+# Keep the repo LF so Vercel's Linux builders and Windows checkouts agree.
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.ico binary

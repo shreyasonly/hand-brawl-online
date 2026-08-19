@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>HAND BRAWL - Online Gesture Fighter</title>
+  <meta name="description" content="Two laptops, two webcams, one fight. Control your fighter with hand gestures over Supabase Realtime." />
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=VT323&display=swap" rel="stylesheet">
+  <style>
+    * {
+      box-sizing: border-box;
+      user-select: none;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      background-color: #080711;
+      color: #fff;
+      font-family: 'Press Start 2P', monospace;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 100vh;
+      overflow: hidden;
+    }
+
+    #app-container {
+      position: relative;
+      width: min(1280px, 100vw);
+      aspect-ratio: 16 / 9;
+      max-height: 100vh;
+      background: #000;
+      border: 6px solid #ff2a6d;
+      box-shadow: 0 0 30px rgba(255, 42, 109, 0.4), inset 0 0 15px rgba(0, 255, 249, 0.3);
+      border-radius: 12px;
+      overflow: hidden;
+    }
+
+    /* Phaser canvas mount */
+    #game-canvas-container {
+      width: 100%;
+      height: 100%;
+      position: absolute;
+      inset: 0;
+      image-rendering: pixelated;
+      image-rendering: crisp-edges;
+    }
+
+    .hidden { display: none !important; }
+
+    /* ---------------------------------------------------------------------
+       LOCAL camera preview.
+       This box only ever shows THIS laptop's webcam. The opponent's camera is
+       never transmitted and never rendered here.
+       --------------------------------------------------------------------- */
+    #camera-pip {
+      position: absolute;
+      right: 14px;
+      bottom: 14px;
+      width: 224px;
+      background: rgba(10, 10, 26, 0.92);
+      border: 2px solid #00fff9;
+      border-radius: 8px;
+      box-shadow: 0 0 14px rgba(0, 255, 249, 0.45);
+      z-index: 120;
+      overflow: hidden;
+    }
+
+    #camera-pip .pip-title {
+      font-size: 9px;
+      color: #00fff9;
+      padding: 6px 8px 5px;
+      letter-spacing: 1px;
+      border-bottom: 1px solid rgba(0, 255, 249, 0.35);
+    }
+
+    #camera-pip .pip-stage {
+      position: relative;
+      width: 100%;
+      height: 158px;
+      background: #05040c;
+    }
+
+    #webcam-video,
+    #hand-overlay {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+    }
+
+    #webcam-video {
+      object-fit: cover;
+      transform: scaleX(-1); /* mirror, so moving right on screen feels right */
+    }
+
+    #hand-overlay { pointer-events: none; }
+
+    #camera-pip .pip-status {
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+      padding: 6px 8px 7px;
+      font-family: 'VT323', monospace;
+      font-size: 16px;
+      line-height: 1.15;
+    }
+
+    .status-ok { color: #4dff9f; }
+    .status-bad { color: #ff5f7a; }
+    .status-idle { color: #8a8aa8; }
+
+    /* Connection badge */
+    #net-badge {
+      position: absolute;
+      left: 14px;
+      bottom: 14px;
+      z-index: 120;
+      padding: 7px 10px;
+      font-size: 9px;
+      letter-spacing: 1px;
+      background: rgba(10, 10, 26, 0.92);
+      border: 2px solid #ffb703;
+      border-radius: 6px;
+      color: #ffb703;
+    }
+
+    /* ---------------------------------------------------------------------
+       Room code modal
+       --------------------------------------------------------------------- */
+    #modal-root {
+      position: absolute;
+      inset: 0;
+      z-index: 300;
+      background: rgba(6, 5, 14, 0.88);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .modal-card {
+      width: min(460px, 86%);
+      background: #0d0e1b;
+      border: 3px solid #00fff9;
+      border-radius: 10px;
+      box-shadow: 0 0 26px rgba(0, 255, 249, 0.35);
+      padding: 26px 24px;
+      text-align: center;
+    }
+
+    .modal-card h2 {
+      font-size: 15px;
+      color: #ff2a6d;
+      margin-bottom: 8px;
+      letter-spacing: 1px;
+    }
+
+    .modal-card p {
+      font-family: 'VT323', monospace;
+      font-size: 19px;
+      color: #ffb703;
+      margin-bottom: 18px;
+    }
+
+    #room-code-input {
+      width: 100%;
+      padding: 13px 10px;
+      font-family: 'Press Start 2P', monospace;
+      font-size: 22px;
+      letter-spacing: 8px;
+      text-align: center;
+      text-transform: uppercase;
+      color: #00fff9;
+      background: #05040c;
+      border: 2px solid #ff2a6d;
+      border-radius: 6px;
+      outline: none;
+      user-select: text;
+    }
+
+    #room-code-input:focus { border-color: #00fff9; }
+
+    .modal-error {
+      min-height: 18px;
+      margin-top: 10px;
+      font-family: 'VT323', monospace;
+      font-size: 17px;
+      color: #ff5f7a;
+    }
+
+    .modal-actions {
+      display: flex;
+      gap: 12px;
+      justify-content: center;
+      margin-top: 16px;
+    }
+
+    .retro-btn {
+      font-family: 'Press Start 2P', monospace;
+      font-size: 11px;
+      padding: 12px 16px;
+      color: #05040c;
+      background: #00fff9;
+      border: none;
+      border-radius: 5px;
+      cursor: pointer;
+      letter-spacing: 1px;
+    }
+
+    .retro-btn.secondary {
+      background: transparent;
+      color: #ffffff;
+      border: 2px solid #ffffff;
+    }
+
+    .retro-btn:hover { filter: brightness(1.15); }
+    .retro-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+
+    /* Retro CRT scanlines */
+    .scanline-overlay {
+      position: absolute;
+      inset: 0;
+      background:
+        linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.25) 50%),
+        linear-gradient(90deg, rgba(255, 0, 0, 0.03), rgba(0, 255, 0, 0.01), rgba(0, 0, 255, 0.03));
+      background-size: 100% 4px, 6px 100%;
+      pointer-events: none;
+      z-index: 200;
+    }
+
+    /* Loading overlay */
+    #loading-screen {
+      position: absolute;
+      inset: 0;
+      background: #0d0e1b;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      z-index: 400;
+      color: #00fff9;
+      transition: opacity 0.5s ease;
+    }
+
+    .loading-title {
+      font-size: 36px;
+      color: #ff2a6d;
+      text-shadow: 3px 3px 0px #00fff9, -2px -2px 0px #fff;
+      margin-bottom: 24px;
+      letter-spacing: 2px;
+    }
+
+    .loading-bar-container {
+      width: min(480px, 70%);
+      height: 24px;
+      border: 3px solid #00fff9;
+      padding: 3px;
+      border-radius: 4px;
+      box-shadow: 0 0 15px rgba(0, 255, 249, 0.4);
+    }
+
+    .loading-bar-fill {
+      width: 0%;
+      height: 100%;
+      background: linear-gradient(90deg, #ff2a6d, #ffb703, #00fff9);
+      transition: width 0.2s ease;
+    }
+
+    .loading-text {
+      margin-top: 16px;
+      font-family: 'VT323', monospace;
+      color: #00fff9;
+      font-size: 20px;
+      letter-spacing: 1px;
+    }
+  </style>
+</head>
+<body>
+  <div id="app-container">
+    <!-- Phaser -->
+    <div id="game-canvas-container"></div>
+
+    <!-- Local webcam preview (never leaves this device) -->
+    <div id="camera-pip" class="hidden">
+      <div class="pip-title">YOUR CAMERA</div>
+      <div class="pip-stage">
+        <video id="webcam-video" playsinline muted autoplay></video>
+        <canvas id="hand-overlay"></canvas>
+      </div>
+      <div class="pip-status">
+        <span id="face-status" class="status-idle">FACE ---</span>
+        <span id="hand-status" class="status-idle">HAND ---</span>
+        <span id="gesture-status" class="status-idle">GESTURE ---</span>
+      </div>
+    </div>
+
+    <!-- Realtime connection badge -->
+    <div id="net-badge" class="hidden">OFFLINE</div>
+
+    <!-- Room code modal -->
+    <div id="modal-root" class="hidden">
+      <div class="modal-card">
+        <h2 id="modal-title">JOIN LOBBY</h2>
+        <p id="modal-subtitle">ENTER THE 6-CHARACTER ROOM CODE</p>
+        <input id="room-code-input" maxlength="6" autocomplete="off" spellcheck="false" placeholder="XXXXXX" />
+        <div class="modal-error" id="modal-error"></div>
+        <div class="modal-actions">
+          <button class="retro-btn" id="modal-confirm">JOIN</button>
+          <button class="retro-btn secondary" id="modal-cancel">CANCEL</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="scanline-overlay"></div>
+
+    <div id="loading-screen">
+      <div class="loading-title">HAND BRAWL</div>
+      <div class="loading-bar-container">
+        <div class="loading-bar-fill" id="loading-bar-fill"></div>
+      </div>
+      <div class="loading-text" id="loading-text">INITIALIZING...</div>
+    </div>
+  </div>
+
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>
