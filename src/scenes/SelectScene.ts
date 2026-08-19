@@ -14,9 +14,10 @@ const SPRITE_KEY: Record<CharacterId, string> = {
   KIRA: 'kira_sprites'
 };
 
+/** Animations are registered as `${spriteKey}_idle` by Character. */
 const IDLE_ANIM: Record<CharacterId, string> = {
-  JACK: 'jack_idle',
-  KIRA: 'kira_idle'
+  JACK: 'jack_sprites_idle',
+  KIRA: 'kira_sprites_idle'
 };
 
 /**

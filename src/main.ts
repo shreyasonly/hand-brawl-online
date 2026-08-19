@@ -7,6 +7,8 @@ import { HowToPlayScene } from './scenes/HowToPlayScene';
 import { SelectScene } from './scenes/SelectScene';
 import { FightScene } from './scenes/FightScene';
 import { GAME_HEIGHT, GAME_WIDTH } from './config/Constants';
+import { GameManager } from './game/GameManager';
+import { Action, Gesture } from './gestures/GestureConfig';
 
 const config: Phaser.Types.Core.GameConfig = {
   type: Phaser.AUTO,
@@ -29,5 +31,25 @@ const config: Phaser.Types.Core.GameConfig = {
 };
 
 window.addEventListener('DOMContentLoaded', () => {
-  new Phaser.Game(config);
+  const game = new Phaser.Game(config);
+
+  // Debug handle. Lets you inspect the live match from the browser console:
+  //   __HB.gm.vision.status          -> camera / face / hand / gesture
+  //   __HB.scene('FightScene').p1    -> the fighter itself
+  //   __HB.punch()                   -> inject a PUNCH as if you had gestured
+  (window as unknown as Record<string, unknown>).__HB = {
+    game,
+    gm: () => GameManager.getInstance(),
+    scene: (key: string) => game.scene.getScene(key),
+    punch: () => GameManager.getInstance().inputManager.feedIntent({
+      handPresent: true,
+      moveDirection: 'STOP',
+      blocking: false,
+      events: [Action.PUNCH],
+      gesture: Gesture.FIST,
+      confidence: 0.95,
+      smoothedX: 0.5,
+      smoothedY: 0.5
+    })
+  };
 });

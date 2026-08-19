@@ -3,6 +3,7 @@ import '@tensorflow/tfjs-backend-webgl';
 import * as handPoseDetection from '@tensorflow-models/hand-pose-detection';
 import { VISION } from '../config/Constants';
 import { CameraManager } from './CameraManager';
+import { HANDS_SOLUTION_PATH } from '../shims/mediapipe-hands';
 
 /** Landmark tuple in the format fingerpose expects: [x, y, z] pixel space. */
 export type Landmark3D = [number, number, number];
@@ -76,7 +77,7 @@ export class HandTracker {
     try {
       return await handPoseDetection.createDetector(model, {
         runtime: 'mediapipe',
-        solutionPath: 'https://cdn.jsdelivr.net/npm/@mediapipe/hands',
+        solutionPath: HANDS_SOLUTION_PATH,
         modelType: 'full',
         maxHands: 1 // ONE DEVICE = ONE PLAYER = ONE HAND
       });

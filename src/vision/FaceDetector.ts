@@ -1,6 +1,7 @@
 import * as faceDetection from '@tensorflow-models/face-detection';
 import { VISION } from '../config/Constants';
 import { CameraManager } from './CameraManager';
+import { FACE_SOLUTION_PATH } from '../shims/mediapipe-face';
 
 export interface FaceFrame {
   present: boolean;
@@ -59,7 +60,7 @@ export class FaceDetector {
     try {
       return await faceDetection.createDetector(model, {
         runtime: 'mediapipe',
-        solutionPath: 'https://cdn.jsdelivr.net/npm/@mediapipe/face_detection',
+        solutionPath: FACE_SOLUTION_PATH,
         modelType: 'short',
         maxFaces: 1
       });

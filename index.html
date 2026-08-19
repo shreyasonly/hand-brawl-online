@@ -325,6 +325,18 @@
     </div>
   </div>
 
+  <!--
+    MediaPipe solutions, loaded as classic scripts so they attach to the global
+    scope before the deferred module bundle runs. TensorFlow.js imports `Hands`
+    and `FaceDetection` as named exports; these packages only register them at
+    runtime, so a bundler cannot provide them (see src/shims/). Without this the
+    fast MediaPipe runtime fails and detection silently falls back to pulling
+    weights through tfhub -> kaggle, which is slow and unreliable.
+    If the CDN is unreachable the game still works - it just uses that fallback.
+  -->
+  <script crossorigin="anonymous" src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/hands.js"></script>
+  <script crossorigin="anonymous" src="https://cdn.jsdelivr.net/npm/@mediapipe/face_detection@0.4.1646425229/face_detection.js"></script>
+
   <script type="module" src="/src/main.ts"></script>
 </body>
 </html>
