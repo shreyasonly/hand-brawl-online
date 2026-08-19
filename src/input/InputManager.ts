@@ -128,6 +128,11 @@ export class InputManager {
     if (intent.events.length > 0) this.pendingGestureEvents.push(...intent.events);
   }
 
+  /** One-shot actions the local player produced on the most recent frame. */
+  public get lastLocalActions(): Action[] {
+    return this.lastLocalEvents;
+  }
+
   public get opponentSilentMs(): number {
     if (this.lastRemoteMessageAt === 0) return 0;
     return Date.now() - this.lastRemoteMessageAt;

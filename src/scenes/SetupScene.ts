@@ -129,7 +129,7 @@ export class SetupScene extends Phaser.Scene {
     });
 
     const debugBtn = this.add
-      .text(480, 292, '[ SKELETON: OFF ]', {
+      .text(430, 292, '[ SKELETON: OFF ]', {
         fontFamily: '"Press Start 2P", monospace',
         fontSize: '9px',
         color: '#ffb703'

@@ -84,6 +84,8 @@ export class FightScene extends Phaser.Scene {
   private comboTextP1!: Phaser.GameObjects.Text;
   private comboTextP2!: Phaser.GameObjects.Text;
   private disconnectText!: Phaser.GameObjects.Text;
+  private actionText!: Phaser.GameObjects.Text;
+  private actionTextClearAt = 0;
 
   constructor() {
     super({ key: 'FightScene' });
@@ -769,6 +771,18 @@ export class FightScene extends Phaser.Scene {
       })
       .setScrollFactor(0);
 
+    // Live readout of the action your own gestures just produced. Makes it
+    // obvious whether the camera is driving your fighter or not.
+    this.actionText = this.add
+      .text(320, 58, '', {
+        fontFamily: '"Press Start 2P", monospace',
+        fontSize: '10px',
+        color: '#4dff9f'
+      })
+      .setOrigin(0.5)
+      .setScrollFactor(0)
+      .setDepth(50);
+
     this.disconnectText = this.add
       .text(320, GAME_HEIGHT / 2 + 40, '', {
         fontFamily: '"Press Start 2P", monospace',
@@ -797,6 +811,15 @@ export class FightScene extends Phaser.Scene {
     this.p1WinsText.setText(`W:${gm.p1RoundWins}`);
     this.p2WinsText.setText(`W:${gm.p2RoundWins}`);
     this.roundTitleText.setText(`ROUND ${gm.currentRound}`);
+
+    const actions = gm.inputManager.lastLocalActions;
+    if (actions.length > 0) {
+      this.actionText.setText(`YOU: ${actions.join(' + ')}`);
+      this.actionTextClearAt = this.time.now + 700;
+    } else if (this.actionTextClearAt && this.time.now > this.actionTextClearAt) {
+      this.actionText.setText('');
+      this.actionTextClearAt = 0;
+    }
   }
 
   private showComboText(playerIndex: 1 | 2, count: number): void {

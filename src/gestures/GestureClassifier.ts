@@ -118,6 +118,18 @@ export class GestureClassifier {
     return pinchDist / handSpan;
   }
 
+  /**
+   * How far the index fingertip reaches past its own knuckle, relative to hand
+   * size. This is what separates a PINCH from a FIST: both press the thumb tip
+   * close to the index tip, but a fist folds the index all the way back to the
+   * palm (~1.0 or less) while a pinch keeps it reaching forward (~1.4).
+   */
+  public static indexReach(landmarks: Landmark[]): number {
+    if (!landmarks || landmarks.length < 21) return 0;
+    const span = this.dist(landmarks[0], landmarks[5]) || 1;
+    return this.dist(landmarks[0], landmarks[8]) / span;
+  }
+
   /** True when the four long fingers are curled towards the palm. */
   public static longFingersCurled(landmarks: Landmark[]): boolean {
     if (!landmarks || landmarks.length < 21) return false;

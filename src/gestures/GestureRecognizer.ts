@@ -13,6 +13,13 @@ export interface RecognizedGesture {
 }
 
 const PINCH_RATIO_THRESHOLD = 0.34;
+/**
+ * A pinch keeps the index finger reaching forward. A clenched fist folds it
+ * back to the palm, which also puts the thumb tip near the index tip - so
+ * without this second test every fist would be read as a pinch and PUNCH would
+ * silently become GRAB.
+ */
+const PINCH_MIN_INDEX_REACH = 1.25;
 
 /**
  * Turns 21 hand landmarks into one of the six HAND BRAWL gestures.
@@ -35,10 +42,11 @@ export class GestureRecognizer {
 
     const normalized: Landmark[] = frame.landmarksNorm;
 
-    // 1. PINCH wins outright - it is geometrically unambiguous.
+    // 1. PINCH: thumb tip touching a still-reaching index finger.
     if (
       GestureClassifier.pinchRatio(normalized) < PINCH_RATIO_THRESHOLD &&
-      GestureClassifier.longFingersCurled(normalized)
+      GestureClassifier.longFingersCurled(normalized) &&
+      GestureClassifier.indexReach(normalized) > PINCH_MIN_INDEX_REACH
     ) {
       return { gesture: Gesture.PINCH, confidence: 0.9, poseData: [] };
     }
