@@ -316,10 +316,25 @@ export class SelectScene extends Phaser.Scene {
     };
   }
 
-  /** Only PLAYER 1 may declare the match started, so both sides agree. */
+  /**
+   * EITHER client may declare the match started once both sides read as
+   * ready - not just PLAYER 1. Gating this on a single "authority" client
+   * was a single point of failure: if that one browser's tab got throttled,
+   * hit any hiccup, or its packets never landed, the other player was stuck
+   * on the ready screen forever with no way to force it through. Both
+   * clients now converge on the same READY state via readyFlags() (fed by
+   * presence + repeated broadcasts), so either one racing to send
+   * START_MATCH first is safe - launchMatch() is idempotent, and the
+   * receiver's own-slot echo filter is why playerId must be the ACTUAL
+   * sender's slot below, not a hardcoded 'p1'.
+   *
+   * PLAYER 1 still remains the sole authority for ongoing gameplay (round
+   * clock, round results) once inside FightScene - this only removes the
+   * bottleneck on the button that gets both clients INTO the match.
+   */
   private tryStartOnlineMatch(): void {
     const gm = GameManager.getInstance();
-    if (this.launching || !gm.isMatchAuthority) return;
+    if (this.launching || !gm.room.slot) return;
 
     // A LOBBY broadcast from the opponent proves they are in the room even if
     // their presence entry is missing or stale.
@@ -332,7 +347,7 @@ export class SelectScene extends Phaser.Scene {
 
     const message: MatchMessage = {
       type: 'MATCH',
-      playerId: 'p1',
+      playerId: gm.room.slot,
       timestamp: Date.now(),
       kind: 'START_MATCH',
       p1Character: this.p1Selection,
