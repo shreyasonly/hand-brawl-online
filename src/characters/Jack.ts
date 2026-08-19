@@ -26,15 +26,27 @@ export class Jack extends Character {
 
     if (type === 'SPECIAL' || type === 'ULTIMATE') {
       const facingSign = this.flipX ? -1 : 1;
-      const bolt = this.scene.add.image(this.x + facingSign * 40, this.y, 'vfx_lightning');
-      bolt.setDepth(15);
-      this.scene.tweens.add({
-        targets: bolt,
-        alpha: 0,
-        scaleX: 1.5,
-        duration: durationMs,
-        onComplete: () => bolt.destroy()
-      });
+      const isUltimate = type === 'ULTIMATE';
+
+      const burst = this.scene.add.sprite(
+        this.x + facingSign * 30,
+        this.y - 6,
+        'vfx_thunder_burst'
+      );
+      burst.setDepth(16);
+      burst.setScale(isUltimate ? 1.7 : 1.1);
+      burst.play('vfx_thunder_burst_anim');
+      burst.once('animationcomplete', () => burst.destroy());
+
+      if (isUltimate) {
+        // A second, mirrored burst overlapping the fighter for extra impact.
+        const echo = this.scene.add.sprite(this.x - facingSign * 10, this.y - 6, 'vfx_thunder_burst');
+        echo.setDepth(16);
+        echo.setScale(1.1);
+        echo.setAlpha(0.7);
+        echo.play('vfx_thunder_burst_anim');
+        echo.once('animationcomplete', () => echo.destroy());
+      }
     }
   }
 }

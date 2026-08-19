@@ -24,6 +24,24 @@ export class BootScene extends Phaser.Scene {
         repeat: 0
       });
     }
+
+    if (!this.anims.exists('vfx_thunder_burst_anim')) {
+      this.anims.create({
+        key: 'vfx_thunder_burst_anim',
+        frames: this.anims.generateFrameNumbers('vfx_thunder_burst', { start: 0, end: 5 }),
+        frameRate: 20,
+        repeat: 0
+      });
+    }
+
+    if (!this.anims.exists('vfx_shadow_scribble_anim')) {
+      this.anims.create({
+        key: 'vfx_shadow_scribble_anim',
+        frames: this.anims.generateFrameNumbers('vfx_shadow_scribble', { start: 0, end: 7 }),
+        frameRate: 22,
+        repeat: 0
+      });
+    }
   }
 
   public async create(): Promise<void> {

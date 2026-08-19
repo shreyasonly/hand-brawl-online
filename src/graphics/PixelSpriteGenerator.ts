@@ -353,16 +353,268 @@ export class PixelSpriteGenerator {
     if (scene.textures.exists('vfx_shield')) scene.textures.remove('vfx_shield');
     scene.textures.addCanvas('vfx_shield', shieldCanvas);
 
-    const boltCanvas = document.createElement('canvas');
-    boltCanvas.width = 128;
-    boltCanvas.height = 32;
-    const bCtx = boltCanvas.getContext('2d')!;
-    bCtx.fillStyle = '#00fff9';
-    bCtx.fillRect(0, 10, 128, 12);
-    bCtx.fillStyle = '#ffffff';
-    bCtx.fillRect(0, 14, 128, 4);
-    if (scene.textures.exists('vfx_lightning')) scene.textures.remove('vfx_lightning');
-    scene.textures.addCanvas('vfx_lightning', boltCanvas);
+    this.createThunderBurstSheet(scene);
+    this.createShadowScribbleSheet(scene);
+  }
+
+  /**
+   * Deterministic pseudo-random in [0, 1) - classic sine-hash trick. Used
+   * instead of Math.random() so the generated VFX sprite sheets are
+   * reproducible between runs (and between dev/build) while still looking
+   * organic.
+   */
+  private static hash(seed: number): number {
+    const x = Math.sin(seed * 12.9898) * 43758.5453;
+    return x - Math.floor(x);
+  }
+
+  /**
+   * Multi-frame branching lightning burst for Jack's THUNDER PUNCH
+   * special/ultimate. Jagged bolts radiate from a centre flash that swells
+   * then fades, in the same cyan/white palette as the rest of the game.
+   */
+  private static createThunderBurstSheet(scene: Phaser.Scene): void {
+    const CELL = 96;
+    const FRAMES = 6;
+    const CENTER = CELL / 2;
+
+    const canvas = document.createElement('canvas');
+    canvas.width = CELL * FRAMES;
+    canvas.height = CELL;
+    const ctx = canvas.getContext('2d')!;
+
+    // 8 base bolt angles, evenly spaced with a small deterministic jitter so
+    // the burst does not look perfectly symmetric.
+    const angles: number[] = [];
+    for (let i = 0; i < 8; i++) {
+      const base = (i / 8) * Math.PI * 2;
+      const jitter = (this.hash(i * 7.31 + 1) - 0.5) * 0.35;
+      angles.push(base + jitter);
+    }
+
+    interface ThunderFrameParams {
+      boltCount: number;
+      length: number;
+      coreRadius: number;
+      hot: boolean;
+      ring: boolean;
+    }
+
+    const frames: ThunderFrameParams[] = [
+      { boltCount: 3, length: 16, coreRadius: 5, hot: false, ring: false },
+      { boltCount: 5, length: 26, coreRadius: 8, hot: false, ring: false },
+      { boltCount: 6, length: 36, coreRadius: 11, hot: true, ring: false },
+      { boltCount: 8, length: 44, coreRadius: 14, hot: true, ring: true },
+      { boltCount: 6, length: 32, coreRadius: 10, hot: false, ring: false },
+      { boltCount: 3, length: 18, coreRadius: 6, hot: false, ring: false }
+    ];
+
+    const drawBolt = (
+      originX: number,
+      originY: number,
+      angle: number,
+      length: number,
+      seed: number,
+      color: string,
+      lineWidth: number
+    ): void => {
+      const segments = 3;
+      ctx.strokeStyle = color;
+      ctx.lineWidth = lineWidth;
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      ctx.beginPath();
+      ctx.moveTo(originX, originY);
+
+      const dx = Math.cos(angle);
+      const dy = Math.sin(angle);
+      // perpendicular direction, for the zig-zag kinks
+      const px = -dy;
+      const py = dx;
+
+      for (let seg = 1; seg <= segments; seg++) {
+        const t = seg / segments;
+        const alongX = originX + dx * length * t;
+        const alongY = originY + dy * length * t;
+        const jitter = (this.hash(seed + seg * 5.7) - 0.5) * (length * 0.22);
+        const kinkX = seg === segments ? alongX : alongX + px * jitter;
+        const kinkY = seg === segments ? alongY : alongY + py * jitter;
+        ctx.lineTo(kinkX, kinkY);
+      }
+      ctx.stroke();
+    };
+
+    for (let f = 0; f < FRAMES; f++) {
+      const ox = f * CELL;
+      const p = frames[f];
+
+      ctx.save();
+      ctx.translate(ox, 0);
+
+      for (let i = 0; i < p.boltCount; i++) {
+        const seed = f * 97 + i * 31;
+        drawBolt(CENTER, CENTER, angles[i], p.length, seed, '#00fff9', 3);
+        if (p.hot) {
+          // Bright inner streak along the first third of the bolt.
+          drawBolt(CENTER, CENTER, angles[i], p.length * 0.4, seed + 1000, '#ffffff', 1.5);
+        }
+      }
+
+      if (p.ring) {
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.55)';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(CENTER, CENTER, p.length * 0.55, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+
+      ctx.fillStyle = p.hot ? '#ffffff' : '#00fff9';
+      ctx.beginPath();
+      ctx.arc(CENTER, CENTER, p.coreRadius, 0, Math.PI * 2);
+      ctx.fill();
+
+      if (p.hot) {
+        ctx.fillStyle = 'rgba(0, 255, 249, 0.4)';
+        ctx.beginPath();
+        ctx.arc(CENTER, CENTER, p.coreRadius * 1.8, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      ctx.restore();
+    }
+
+    if (scene.textures.exists('vfx_thunder_burst')) scene.textures.remove('vfx_thunder_burst');
+    const texture = scene.textures.addCanvas('vfx_thunder_burst', canvas)!;
+    for (let f = 0; f < FRAMES; f++) {
+      texture.add(f, 0, f * CELL, 0, CELL, CELL);
+    }
+  }
+
+  /**
+   * Multi-frame chaotic energy scribble for Kira's SHADOW DASH special/
+   * ultimate: a single tangled magenta stroke that winds itself up then
+   * unravels, evoking a burst of dark/shadow energy.
+   */
+  private static createShadowScribbleSheet(scene: Phaser.Scene): void {
+    const CELL = 96;
+    const FRAMES = 8;
+    const CENTER = CELL / 2;
+
+    const canvas = document.createElement('canvas');
+    canvas.width = CELL * FRAMES;
+    canvas.height = CELL;
+    const ctx = canvas.getContext('2d')!;
+
+    // One deterministic random-walk path, centred on the origin. Each frame
+    // draws a growing (then shrinking) prefix of it, so the scribble reads as
+    // one continuous doodle animating itself in and out rather than unrelated
+    // squiggles per frame.
+    const TOTAL_POINTS = 16;
+    const points: Array<{ x: number; y: number }> = [{ x: 0, y: 0 }];
+    let heading = this.hash(3.1) * Math.PI * 2;
+
+    for (let i = 1; i < TOTAL_POINTS; i++) {
+      heading += (this.hash(i * 4.13 + 2) - 0.5) * 2.4;
+      const step = 8 + this.hash(i * 9.77 + 5) * 6;
+      const prev = points[i - 1];
+      points.push({
+        x: prev.x + Math.cos(heading) * step,
+        y: prev.y + Math.sin(heading) * step
+      });
+    }
+
+    interface ScribbleFrameParams {
+      pointCount: number;
+      lineWidth: number;
+      glow: boolean;
+    }
+
+    // Build-up (0-4) then dissipate (5-7), mirroring the reference animation.
+    const frames: ScribbleFrameParams[] = [
+      { pointCount: 4, lineWidth: 4, glow: false },
+      { pointCount: 7, lineWidth: 5, glow: false },
+      { pointCount: 10, lineWidth: 6, glow: true },
+      { pointCount: 14, lineWidth: 6, glow: true },
+      { pointCount: 16, lineWidth: 7, glow: true },
+      { pointCount: 12, lineWidth: 5, glow: false },
+      { pointCount: 7, lineWidth: 4, glow: false },
+      { pointCount: 3, lineWidth: 3, glow: false }
+    ];
+
+    // Scale the whole walk down so every frame's own bounding box - PLUS the
+    // thickest stroke's glow halo - fits inside the cell with margin to spare.
+    // Frames are centred on their own prefix (see below), so it is that
+    // per-frame half-extent that must fit, not the full path's.
+    const maxHalfLineWidth = Math.max(...frames.map((f) => f.lineWidth + (f.glow ? 6 : 0))) / 2;
+    const margin = 4;
+    let maxHalfExtent = 0;
+    for (const f of frames) {
+      const slice = points.slice(0, f.pointCount);
+      const xs = slice.map((pt) => pt.x);
+      const ys = slice.map((pt) => pt.y);
+      maxHalfExtent = Math.max(
+        maxHalfExtent,
+        (Math.max(...xs) - Math.min(...xs)) / 2,
+        (Math.max(...ys) - Math.min(...ys)) / 2
+      );
+    }
+    const safeScale = (CENTER - margin - maxHalfLineWidth) / (maxHalfExtent || 1);
+    const scale = Math.min(1, safeScale);
+    for (const pt of points) {
+      pt.x *= scale;
+      pt.y *= scale;
+    }
+
+    const strokePath = (
+      pts: Array<{ x: number; y: number }>,
+      color: string,
+      lineWidth: number
+    ): void => {
+      ctx.strokeStyle = color;
+      ctx.lineWidth = lineWidth;
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      ctx.beginPath();
+      ctx.moveTo(CENTER + pts[0].x, CENTER + pts[0].y);
+      for (let i = 1; i < pts.length; i++) {
+        ctx.lineTo(CENTER + pts[i].x, CENTER + pts[i].y);
+      }
+      ctx.stroke();
+    };
+
+    for (let f = 0; f < FRAMES; f++) {
+      const ox = f * CELL;
+      const p = frames[f];
+
+      // Each frame is centred on the bounding box of ITS OWN drawn prefix, not
+      // the full path - otherwise a short prefix and a long one land in
+      // different places within the cell, and the burst visibly drifts instead
+      // of staying anchored on the fighter (Phaser centres a sprite on its
+      // frame's geometric middle, regardless of where the artwork sits in it).
+      const slice = points.slice(0, p.pointCount);
+      const xs = slice.map((pt) => pt.x);
+      const ys = slice.map((pt) => pt.y);
+      const midX = (Math.min(...xs) + Math.max(...xs)) / 2;
+      const midY = (Math.min(...ys) + Math.max(...ys)) / 2;
+      const frameSlice = slice.map((pt) => ({ x: pt.x - midX, y: pt.y - midY }));
+
+      ctx.save();
+      ctx.translate(ox, 0);
+
+      if (p.glow) {
+        strokePath(frameSlice, 'rgba(255, 42, 158, 0.35)', p.lineWidth + 6);
+      }
+      strokePath(frameSlice, '#ff2a9e', p.lineWidth);
+      strokePath(frameSlice, p.glow ? '#ffd6f7' : '#ff8fd6', Math.max(1.5, p.lineWidth - 3));
+
+      ctx.restore();
+    }
+
+    if (scene.textures.exists('vfx_shadow_scribble')) scene.textures.remove('vfx_shadow_scribble');
+    const texture = scene.textures.addCanvas('vfx_shadow_scribble', canvas)!;
+    for (let f = 0; f < FRAMES; f++) {
+      texture.add(f, 0, f * CELL, 0, CELL, CELL);
+    }
   }
 
   private static createStageTextures(scene: Phaser.Scene): void {

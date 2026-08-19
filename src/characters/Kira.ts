@@ -26,9 +26,22 @@ export class Kira extends Character {
 
     const facingSign = this.flipX ? -1 : 1;
     if (type === 'SPECIAL') {
-      // Teleport forward dash
+      // Shadow energy scribble winding up, then the teleport dash itself.
+      const scribble = this.scene.add.sprite(this.x, this.y - 4, 'vfx_shadow_scribble');
+      scribble.setDepth(16);
+      scribble.setScale(0.9);
+      scribble.play('vfx_shadow_scribble_anim');
+      scribble.once('animationcomplete', () => scribble.destroy());
+
       this.setVelocityX(facingSign * 450);
     } else if (type === 'ULTIMATE') {
+      // Big shadow burst behind the multi-afterimage clones.
+      const burst = this.scene.add.sprite(this.x, this.y - 4, 'vfx_shadow_scribble');
+      burst.setDepth(16);
+      burst.setScale(1.6);
+      burst.play('vfx_shadow_scribble_anim');
+      burst.once('animationcomplete', () => burst.destroy());
+
       // Create multi-afterimage clones
       for (let i = 0; i < 3; i++) {
         const afterimage = this.scene.add.sprite(
