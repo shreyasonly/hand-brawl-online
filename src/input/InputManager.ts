@@ -328,6 +328,11 @@ export class InputManager {
       if (this.mode !== 'ONLINE') return;
       if (!this.room.slot || msg.playerId === this.room.slot) return;
 
+      console.log('[REMOTE INPUT RECEIVED]', {
+        playerId: msg.playerId,
+        timestamp: msg.timestamp
+      });
+
       this.lastRemoteMessageAt = Date.now();
       this.remoteHold = {
         left: !!msg.hold?.left,
@@ -344,12 +349,10 @@ export class InputManager {
       }
     });
 
-    this.room.events.on('presence', (snapshot) => {
-      if (!snapshot.opponentPresent) {
-        this.remoteHold = { left: false, right: false, block: false };
-        this.remoteEvents = [];
-      }
-    });
+    // NOTE: we deliberately do NOT clear remoteHold/remoteEvents on a
+    // presence diff. A single presence flap (reconnect, sync, hiccup)
+    // must not suddenly freeze the remote fighter mid-fight. The
+    // FightScene disconnect watchdog handles actual timeout detection.
   }
 
   // ---------------------------------------------------------------------------

@@ -66,6 +66,15 @@ export class FightScene extends Phaser.Scene {
   private syncWatchdog: number | null = null;
   private lastProgressAt = 0;
 
+  /**
+   * Timestamp when presence first reported the opponent absent.
+   * null when the opponent is considered present.
+   * The fight is only paused after DISCONNECT_GRACE_MS of combined
+   * presence absence AND input silence.
+   */
+  private opponentMissingSince: number | null = null;
+  private static readonly DISCONNECT_GRACE_MS = 5000;
+
   private localRematch = false;
   private remoteRematch = false;
   private rematchPrompt?: Phaser.GameObjects.Text;
@@ -107,6 +116,7 @@ export class FightScene extends Phaser.Scene {
     this.ignoreStateUntil = 0;
     this.lastLocalHitAt = 0;
     this.announcedRound = 0;
+    this.opponentMissingSince = null;
 
     const dom = DomUI.getInstance();
     dom.showCameraPip(gm.vision.camera.state === 'READY');
@@ -227,12 +237,41 @@ export class FightScene extends Phaser.Scene {
 
     this.unsubscribers.push(
       gm.room.events.on('state', (msg) => {
+        console.log('[REMOTE STATE RECEIVED]', {
+          playerId: msg.playerId,
+          timestamp: msg.timestamp
+        });
+        // Receiving a STATE packet proves the opponent is alive - cancel any
+        // disconnect grace timer.
+        if (this.opponentMissingSince !== null) {
+          console.log('[DISCONNECT GRACE CANCELLED] (state received)');
+          this.opponentMissingSince = null;
+          this.setDisconnected(false);
+        }
         this.remoteSnapshot = msg;
       }),
       gm.room.events.on('hit', (msg) => this.onRemoteHit(msg)),
       gm.room.events.on('match', (msg) => this.onMatchMessage(msg)),
       gm.room.events.on('presence', (snapshot) => {
-        this.setDisconnected(!snapshot.opponentPresent);
+        console.log('[PRESENCE]', {
+          opponentPresent: snapshot.opponentPresent,
+          members: snapshot.members.map((m) => ({ slot: m.slot, clientId: m.clientId.slice(0, 8) }))
+        });
+        // A single presence diff does NOT immediately pause the game.
+        // Start the grace period if the opponent appears absent; cancel it
+        // if they return. Actual pausing happens in update() after the timer.
+        if (!snapshot.opponentPresent) {
+          if (this.opponentMissingSince === null) {
+            console.log('[DISCONNECT GRACE START]');
+            this.opponentMissingSince = Date.now();
+          }
+        } else {
+          if (this.opponentMissingSince !== null) {
+            console.log('[DISCONNECT GRACE CANCELLED] (presence restored)');
+            this.opponentMissingSince = null;
+          }
+          this.setDisconnected(false);
+        }
       })
     );
   }
@@ -405,6 +444,10 @@ export class FightScene extends Phaser.Scene {
     this.disconnectText.setVisible(disconnected);
     if (disconnected) {
       this.disconnectText.setText('OPPONENT DISCONNECTED\nWAITING FOR THEM TO RECONNECT...\n[ESC] LEAVE MATCH');
+    } else {
+      // When the opponent reconnects, reset the grace timer so a subsequent
+      // real disconnect can be detected fresh.
+      this.opponentMissingSince = null;
     }
   }
 
@@ -683,10 +726,51 @@ export class FightScene extends Phaser.Scene {
     // 1. Build this frame's input for both fighters and ship the local half.
     gm.inputManager.update();
 
-    if (gm.isOnline && !gm.inputManager.isOpponentResponsive) {
-      this.setDisconnected(true);
-    } else if (gm.isOnline && gm.room.lastSnapshot?.opponentPresent) {
-      this.setDisconnected(false);
+    if (gm.isOnline) {
+      const presenceMissing =
+        gm.room.lastSnapshot !== null && !gm.room.lastSnapshot.opponentPresent;
+      const inputAlive = gm.inputManager.isOpponentResponsive;
+
+      if (!presenceMissing && inputAlive) {
+        // Opponent is demonstrably connected on both channels.
+        if (this.opponentMissingSince !== null) {
+          console.log('[DISCONNECT GRACE CANCELLED] (update: all signals green)');
+          this.opponentMissingSince = null;
+        }
+        this.setDisconnected(false);
+      } else if (presenceMissing && !inputAlive) {
+        // Both channels are dark - start/continue the grace timer.
+        if (this.opponentMissingSince === null) {
+          console.log('[DISCONNECT GRACE START]');
+          this.opponentMissingSince = Date.now();
+        }
+        const silentMs = Date.now() - this.opponentMissingSince;
+        console.log('[CONNECTION CHECK]', {
+          slot: gm.room.slot,
+          opponentPresent: gm.room.lastSnapshot?.opponentPresent,
+          opponentResponsive: inputAlive,
+          opponentSilentMs: gm.inputManager.opponentSilentMs,
+          opponentMissingSince: silentMs
+        });
+        if (silentMs >= FightScene.DISCONNECT_GRACE_MS) {
+          console.log('[OPPONENT ACTUALLY DISCONNECTED]');
+          this.setDisconnected(true);
+        }
+      } else {
+        // Only one channel is dark (e.g. presence flap but INPUT still live,
+        // or input briefly silent but presence shows them present).
+        // Not enough evidence to pause - keep the grace timer running if it
+        // started, but don't fire setDisconnected(true) yet.
+        if (this.opponentMissingSince !== null) {
+          const silentMs = Date.now() - this.opponentMissingSince;
+          if (silentMs >= FightScene.DISCONNECT_GRACE_MS) {
+            console.log('[OPPONENT ACTUALLY DISCONNECTED]');
+            this.setDisconnected(true);
+          }
+        } else {
+          this.setDisconnected(false);
+        }
+      }
     }
 
     const canAct = this.isRoundActive && !this.isPausedForDisconnect;
