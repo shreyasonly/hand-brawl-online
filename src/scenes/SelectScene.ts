@@ -23,10 +23,11 @@ const IDLE_ANIM: Record<CharacterId, string> = {
 /**
  * Fighter select.
  *
- * ONLINE   : each player picks THEIR OWN fighter; the choice travels through
- *            Supabase presence so the other laptop sees it live. When both are
- *            ready, PLAYER 1 (the match authority) starts the match.
- * PRACTICE : the original local two-player select is preserved.
+ * ONLINE   : Each player picks their own fighter; choices and ready states
+ *            are synchronized via Supabase Presence and fast-path Broadcast.
+ *            When BOTH players are ready, either client can trigger START_MATCH
+ *            safely and idempotently.
+ * PRACTICE : The local two-player select is preserved.
  */
 export class SelectScene extends Phaser.Scene {
   private p1Selection: CharacterId = 'JACK';
@@ -44,9 +45,6 @@ export class SelectScene extends Phaser.Scene {
 
   private localReady = false;
   private launching = false;
-  /** Opponent readiness as last reported by a LOBBY broadcast. Presence can lag
-   *  or lose a diff; the broadcast is the fast path and this is the memory. */
-  private remoteReadyBroadcast: boolean | null = null;
   private retryTimer: number | null = null;
   private unsubscribers: Array<() => void> = [];
 
@@ -59,12 +57,11 @@ export class SelectScene extends Phaser.Scene {
     gm.currentState = GameState.CHARACTER_SELECT;
     this.localReady = false;
     this.launching = false;
-    this.remoteReadyBroadcast = null;
 
     if (gm.mode === 'ONLINE') {
-      // Start from whatever this player already published (defaults per slot).
-      this.p1Selection = gm.room.lastSnapshot?.p1?.character ?? 'JACK';
-      this.p2Selection = gm.room.lastSnapshot?.p2?.character ?? 'KIRA';
+      const roomState = gm.room.getRoomState();
+      this.p1Selection = roomState.players.p1?.character ?? gm.p1Character ?? 'JACK';
+      this.p2Selection = roomState.players.p2?.character ?? gm.p2Character ?? 'KIRA';
       const mine = gm.localIndex === 1 ? this.p1Selection : this.p2Selection;
       void gm.room.setCharacter(mine);
       void gm.room.setReady(false);
@@ -163,13 +160,10 @@ export class SelectScene extends Phaser.Scene {
     if (gm.mode === 'ONLINE') {
       this.bindRoomEvents();
 
-      // Self-healing handshake, on a DOM timer so it keeps running even when
-      // the tab is backgrounded (Phaser clock freezes there). The heartbeat in
-      // GameManager already re-announces our lobby state every second; this
-      // beat re-reads what has arrived and re-checks the start condition, so a
-      // missed event can never leave both players stuck on READY.
+      // Self-healing check on a DOM timer: re-evaluates ready state and start condition
       this.retryTimer = window.setInterval(() => {
         if (this.launching) return;
+        this.syncFromRoomState();
         this.refresh();
         this.tryStartOnlineMatch();
       }, 1000);
@@ -221,7 +215,6 @@ export class SelectScene extends Phaser.Scene {
     makeButton(515, 268, 'KIRA', 2);
 
     if (!online) {
-      // Preserve the original practice-mode keyboard picks.
       this.input.keyboard?.on('keydown-A', () => this.pick(1, 'JACK'));
       this.input.keyboard?.on('keydown-D', () => this.pick(1, 'KIRA'));
       this.input.keyboard?.on('keydown-LEFT', () => this.pick(2, 'JACK'));
@@ -260,7 +253,17 @@ export class SelectScene extends Phaser.Scene {
     }
 
     this.localReady = !this.localReady;
+    console.log('[READY CLICK]', {
+      slot: gm.room.slot,
+      localReady: this.localReady
+    });
+
     void gm.room.setReady(this.localReady);
+    console.log('[READY STATE]', {
+      slot: gm.room.slot,
+      localReady: this.localReady
+    });
+
     this.refresh();
     this.tryStartOnlineMatch();
   }
@@ -269,107 +272,113 @@ export class SelectScene extends Phaser.Scene {
     const gm = GameManager.getInstance();
 
     this.unsubscribers.push(
-      gm.room.events.on('presence', () => {
-        this.syncFromPresence();
-        this.tryStartOnlineMatch();
-      }),
-      gm.room.events.on('lobby', (msg) => {
-        // Fast path: apply the opponent's pick AND ready state before presence
-        // catches up (broadcasts arrive seconds earlier than presence diffs).
-        if (msg.playerId === 'p1') this.p1Selection = msg.character;
-        if (msg.playerId === 'p2') this.p2Selection = msg.character;
-        this.remoteReadyBroadcast = msg.ready;
+      gm.room.events.on('roomState', () => {
+        this.syncFromRoomState();
         this.refresh();
         this.tryStartOnlineMatch();
       }),
-      gm.room.events.on('match', (msg) => this.onMatchMessage(msg))
+      gm.room.events.on('presence', () => {
+        this.syncFromRoomState();
+        this.refresh();
+        this.tryStartOnlineMatch();
+      }),
+      gm.room.events.on('lobby', (msg) => {
+        if (msg.playerId === 'p1') this.p1Selection = msg.character;
+        if (msg.playerId === 'p2') this.p2Selection = msg.character;
+        this.refresh();
+        this.tryStartOnlineMatch();
+      }),
+      gm.room.events.on('match', (msg) => {
+        console.log('[MATCH MESSAGE RECEIVED]', msg);
+        this.onMatchMessage(msg);
+      })
     );
   }
 
-  private syncFromPresence(): void {
+  private syncFromRoomState(): void {
     const gm = GameManager.getInstance();
-    const snapshot = gm.room.lastSnapshot;
-    if (!snapshot) return;
+    const roomState = gm.room.getRoomState();
 
-    if (snapshot.p1) this.p1Selection = snapshot.p1.character;
-    if (snapshot.p2) this.p2Selection = snapshot.p2.character;
-    this.refresh();
+    if (roomState.players.p1?.character) {
+      this.p1Selection = roomState.players.p1.character;
+    }
+    if (roomState.players.p2?.character) {
+      this.p2Selection = roomState.players.p2.character;
+    }
   }
 
-  /**
-   * Our own ready flag is read from local state rather than from presence:
-   * `track()` needs a network round-trip, and we should not wait for our own
-   * click to come back to us before the match can start.
-   */
   private readyFlags(): { p1Ready: boolean; p2Ready: boolean } {
     const gm = GameManager.getInstance();
-    const snapshot = gm.room.lastSnapshot;
+    const roomState = gm.room.getRoomState();
 
-    // The opponent counts as ready when EITHER channel says so - presence can
-    // drop a diff, broadcasts can drop a packet, but both re-send every 1.5s.
-    const opponentMeta = gm.localIndex === 1 ? snapshot?.p2 : snapshot?.p1;
-    const opponentReady = (opponentMeta?.ready ?? false) || this.remoteReadyBroadcast === true;
+    const p1Ready =
+      gm.localIndex === 1
+        ? this.localReady
+        : (roomState.players.p1?.ready ?? false);
 
-    return {
-      p1Ready: gm.localIndex === 1 ? this.localReady : opponentReady,
-      p2Ready: gm.localIndex === 2 ? this.localReady : opponentReady
-    };
+    const p2Ready =
+      gm.localIndex === 2
+        ? this.localReady
+        : (roomState.players.p2?.ready ?? false);
+
+    return { p1Ready, p2Ready };
   }
 
-  /**
-   * EITHER client may declare the match started once both sides read as
-   * ready - not just PLAYER 1. Gating this on a single "authority" client
-   * was a single point of failure: if that one browser's tab got throttled,
-   * hit any hiccup, or its packets never landed, the other player was stuck
-   * on the ready screen forever with no way to force it through. Both
-   * clients now converge on the same READY state via readyFlags() (fed by
-   * presence + repeated broadcasts), so either one racing to send
-   * START_MATCH first is safe - launchMatch() is idempotent, and the
-   * receiver's own-slot echo filter is why playerId must be the ACTUAL
-   * sender's slot below, not a hardcoded 'p1'.
-   *
-   * PLAYER 1 still remains the sole authority for ongoing gameplay (round
-   * clock, round results) once inside FightScene - this only removes the
-   * bottleneck on the button that gets both clients INTO the match.
-   */
   private tryStartOnlineMatch(): void {
     const gm = GameManager.getInstance();
     if (this.launching || !gm.room.slot) return;
 
-    // A LOBBY broadcast from the opponent proves they are in the room even if
-    // their presence entry is missing or stale.
-    const snapshot = gm.room.lastSnapshot;
-    const opponentPresent = (snapshot?.opponentPresent ?? false) || this.remoteReadyBroadcast !== null;
+    const roomState = gm.room.getRoomState();
+    const opponentSlot = gm.room.opponentSlot;
+    const opponentPlayer = opponentSlot ? roomState.players[opponentSlot] : null;
+    const opponentPresent = (opponentPlayer && opponentPlayer.connected) || (gm.room.lastSnapshot?.opponentPresent ?? false);
     if (!opponentPresent) return;
 
     const { p1Ready, p2Ready } = this.readyFlags();
+    const p1Character = this.p1Selection;
+    const p2Character = this.p2Selection;
+
+    console.log('[START CHECK]', {
+      slot: gm.room.slot,
+      p1Ready,
+      p2Ready,
+      p1Character,
+      p2Character
+    });
+
     if (!p1Ready || !p2Ready) return;
+
+    console.log('[START_MATCH SEND]', {
+      sender: gm.room.slot,
+      p1Character,
+      p2Character
+    });
 
     const message: MatchMessage = {
       type: 'MATCH',
       playerId: gm.room.slot,
       timestamp: Date.now(),
       kind: 'START_MATCH',
-      p1Character: this.p1Selection,
-      p2Character: this.p2Selection
+      p1Character,
+      p2Character
     };
 
-    // Three sends: a single dropped packet must not strand the other player in
-    // fighter select. launchMatch is idempotent on the receiving side.
     gm.room.sendMatch(message);
-    this.time.delayedCall(350, () => gm.room.sendMatch(message));
-    this.time.delayedCall(800, () => gm.room.sendMatch(message));
-    this.launchMatch(this.p1Selection, this.p2Selection);
+    this.time.delayedCall(300, () => gm.room.sendMatch(message));
+    this.launchMatch(p1Character, p2Character);
   }
 
   private onMatchMessage(msg: MatchMessage): void {
+    const gm = GameManager.getInstance();
     if (msg.kind === 'START_MATCH') {
+      console.log('[START_MATCH RECEIVED]', {
+        receiver: gm.room.slot,
+        msg
+      });
       this.launchMatch(msg.p1Character ?? this.p1Selection, msg.p2Character ?? this.p2Selection);
       return;
     }
 
-    // ROUND_START / TIMER while we are still in fighter select means the match
-    // began without us (every START_MATCH packet was lost). Catch up.
     if (msg.kind === 'ROUND_START' || msg.kind === 'TIMER') {
       this.launchMatch(this.p1Selection, this.p2Selection);
     }
@@ -380,9 +389,16 @@ export class SelectScene extends Phaser.Scene {
     this.launching = true;
 
     const gm = GameManager.getInstance();
+    console.log('[LAUNCH MATCH]', {
+      slot: gm.room.slot,
+      p1,
+      p2
+    });
+
     gm.p1Character = p1;
     gm.p2Character = p2;
     gm.resetMatch();
+    gm.room.setMatchState('COUNTDOWN');
 
     this.statusText.setColor('#4dff9f');
     this.statusText.setText(`${p1} VS ${p2} - GET READY!`);
@@ -405,7 +421,6 @@ export class SelectScene extends Phaser.Scene {
       return;
     }
 
-    const snapshot = gm.room.lastSnapshot;
     const { p1Ready, p2Ready } = this.readyFlags();
 
     this.p1HeaderText.setText(
@@ -415,7 +430,10 @@ export class SelectScene extends Phaser.Scene {
       `PLAYER 2${gm.localIndex === 2 ? ' (YOU)' : ''}${p2Ready ? ' ✓' : ''}`
     );
 
-    const opponentPresent = (snapshot?.opponentPresent ?? false) || this.remoteReadyBroadcast !== null;
+    const roomState = gm.room.getRoomState();
+    const opponentSlot = gm.room.opponentSlot;
+    const opponentPlayer = opponentSlot ? roomState.players[opponentSlot] : null;
+    const opponentPresent = (opponentPlayer && opponentPlayer.connected) || (gm.room.lastSnapshot?.opponentPresent ?? false);
     const opponentReady = gm.localIndex === 1 ? p2Ready : p1Ready;
 
     if (!opponentPresent) {

@@ -95,6 +95,7 @@ export class FightScene extends Phaser.Scene {
   }
 
   public create(): void {
+    console.log('[FIGHT SCENE CREATED]');
     const gm = GameManager.getInstance();
 
     this.isRoundActive = false;

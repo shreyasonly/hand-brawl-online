@@ -7,9 +7,12 @@ import {
   InputMessage,
   LobbyMessage,
   MatchMessage,
+  MatchPhase,
   NetEvent,
   PlayerSlot,
+  PlayerState,
   PresenceMeta,
+  RoomState,
   StateMessage,
   channelNameFor,
   otherSlot
@@ -35,6 +38,8 @@ export interface RoomEvents extends Record<string, unknown> {
   slot: PlayerSlot;
   /** Presence changed: someone joined, left, readied up or picked a fighter. */
   presence: RoomSnapshot;
+  /** Complete room state changed (presence or broadcast). */
+  roomState: RoomState;
   lobby: LobbyMessage;
   input: InputMessage;
   state: StateMessage;
@@ -74,17 +79,13 @@ function randomClientId(): string {
 /**
  * Owns the Supabase Realtime channel for one room.
  *
- * Slot assignment rule (a CLIENT NEVER PICKS ITS OWN SLOT):
- *   - CREATE LOBBY  -> we subscribe to a fresh channel and only continue when
- *                      presence shows the room is empty. We are therefore the
- *                      first player, so the room assigns us PLAYER 1.
- *   - JOIN LOBBY    -> we subscribe and only continue when presence shows
- *                      exactly one existing member. We are therefore the second
- *                      player, so the room assigns us PLAYER 2.
- *                      0 members -> ROOM NOT FOUND, 2+ members -> ROOM FULL.
- *   - Afterwards every client re-derives slots from the same shared presence
- *     state (ordered by joinedAt, tie-broken by clientId), so both browsers
- *     always agree on who is P1 and who is P2.
+ * Architecture inspired by Colyseus & Phaser Multiplayer:
+ * ROOM -> SHARED ROOM STATE -> PLAYER STATE -> PHASER SCENE RENDERING
+ *
+ * Slot assignment:
+ *   - CREATE LOBBY  -> Assigns PLAYER 1 (p1).
+ *   - JOIN LOBBY    -> Assigns PLAYER 2 (p2).
+ * Slots are STICKY and NEVER re-derived or overwritten.
  */
 export class RoomSession {
   private static instance: RoomSession;
@@ -96,6 +97,12 @@ export class RoomSession {
   public slot: PlayerSlot | null = null;
   public status: ConnectionStatus = 'OFFLINE';
   public lastSnapshot: RoomSnapshot | null = null;
+
+  public roomState: RoomState = {
+    roomId: '',
+    players: { p1: null, p2: null },
+    matchState: 'WAITING'
+  };
 
   private channel: RealtimeChannel | null = null;
   private joinedAt = 0;
@@ -145,6 +152,21 @@ export class RoomSession {
     return this.meta;
   }
 
+  public getRoomState(): RoomState {
+    return this.roomState;
+  }
+
+  public isBothReady(): boolean {
+    const p1 = this.roomState.players.p1;
+    const p2 = this.roomState.players.p2;
+    return !!(p1 && p1.ready && p2 && p2.ready);
+  }
+
+  public setMatchState(state: MatchPhase): void {
+    this.roomState.matchState = state;
+    this.events.emit('roomState', this.roomState);
+  }
+
   // -------------------------------------------------------------------------
   // Room lifecycle
   // -------------------------------------------------------------------------
@@ -165,14 +187,15 @@ export class RoomSession {
       const others = this.readMembers().filter((m) => m.clientId !== this.clientId);
 
       if (others.length === 0) {
-        this.assignSlot('p1');
         this.roomCode = code;
+        this.roomState.roomId = code;
+        this.assignSlot('p1');
         await this.trackPresence();
         this.publishSnapshot();
         return { ok: true, roomCode: code, slot: 'p1' };
       }
 
-      // Astronomically unlikely code collision - drop it and roll again.
+      // Code collision - roll again
       await this.leave();
     }
 
@@ -213,8 +236,9 @@ export class RoomSession {
       return { ok: false, error: `ROOM ${code} IS FULL` };
     }
 
-    this.assignSlot('p2');
     this.roomCode = code;
+    this.roomState.roomId = code;
+    this.assignSlot('p2');
     await this.trackPresence();
     this.publishSnapshot();
     return { ok: true, roomCode: code, slot: 'p2' };
@@ -237,22 +261,43 @@ export class RoomSession {
     this.meta = { ...this.meta, slot: null, ready: false };
     this.characterPickedByPlayer = false;
     this.lastTrackedMeta = '';
+    this.roomState = {
+      roomId: '',
+      players: { p1: null, p2: null },
+      matchState: 'WAITING'
+    };
     this.setStatus('OFFLINE');
   }
 
   // -------------------------------------------------------------------------
-  // Lobby state (presence is the source of truth, broadcast is the fast path)
+  // Lobby state
   // -------------------------------------------------------------------------
 
   public async setCharacter(character: CharacterId): Promise<void> {
     this.characterPickedByPlayer = true;
     this.meta.character = character;
+    if (this.slot && this.roomState.players[this.slot]) {
+      this.roomState.players[this.slot]!.character = character;
+    }
     await this.syncLobbyState();
+    this.events.emit('roomState', this.roomState);
   }
 
   public async setReady(ready: boolean): Promise<void> {
     this.meta.ready = ready;
+    if (this.slot) {
+      if (!this.roomState.players[this.slot]) {
+        this.assignSlot(this.slot);
+      }
+      this.roomState.players[this.slot]!.ready = ready;
+      if (this.isBothReady()) {
+        this.roomState.matchState = 'BOTH_READY';
+      } else {
+        this.roomState.matchState = ready ? 'READY' : 'CHARACTER_SELECT';
+      }
+    }
     await this.syncLobbyState();
+    this.events.emit('roomState', this.roomState);
   }
 
   public async setVisionStatus(status: {
@@ -260,32 +305,33 @@ export class RoomSession {
     faceDetected: boolean;
     handDetected: boolean;
   }): Promise<void> {
+    const changed =
+      this.meta.cameraEnabled !== status.cameraEnabled ||
+      this.meta.faceDetected !== status.faceDetected ||
+      this.meta.handDetected !== status.handDetected;
+
     this.meta.cameraEnabled = status.cameraEnabled;
     this.meta.faceDetected = status.faceDetected;
     this.meta.handDetected = status.handDetected;
-    // Deliberately re-announced even when nothing changed: this doubles as the
-    // keepalive that repairs the opponent's view after a lost presence diff or
-    // a channel reconnect. Without it, state that missed its one delivery
-    // window stayed wrong forever.
-    await this.syncLobbyState();
+
+    if (this.slot && this.roomState.players[this.slot]) {
+      this.roomState.players[this.slot]!.cameraEnabled = status.cameraEnabled;
+      this.roomState.players[this.slot]!.faceDetected = status.faceDetected;
+      this.roomState.players[this.slot]!.handDetected = status.handDetected;
+    }
+
+    if (changed) {
+      await this.syncLobbyState();
+    }
   }
 
-  /**
-   * Re-publish this client's lobby state (presence + LOBBY broadcast).
-   * Called on a slow timer while waiting in the lobby, so a single dropped
-   * realtime packet can never deadlock the ready handshake.
-   */
   public async announceLobbyState(): Promise<void> {
     await this.syncLobbyState();
   }
 
   private async syncLobbyState(): Promise<void> {
-    if (!this.channel || !this.slot) return;
+    if (!this.channel || !this.slot || this.status !== 'CONNECTED') return;
 
-    // Presence writes are expensive (fanned out to every subscriber and rate
-    // limited server-side) - only track when the meta actually changed.
-    // The LOBBY broadcast below is cheap and is sent EVERY time; it is the
-    // 1s keepalive that heals lost packets on the other side.
     const serialized = JSON.stringify(this.meta);
     if (serialized !== this.lastTrackedMeta) {
       this.lastTrackedMeta = serialized;
@@ -326,7 +372,7 @@ export class RoomSession {
   }
 
   private send(event: string, payload: unknown): void {
-    if (!this.channel) return;
+    if (!this.channel || this.status !== 'CONNECTED') return;
     void this.channel.send({ type: 'broadcast', event, payload });
   }
 
@@ -380,12 +426,45 @@ export class RoomSession {
     channel.on('broadcast', { event: NetEvent.HIT }, ({ payload }) =>
       this.forwardIfOpponent(payload as HitMessage, 'hit')
     );
-    channel.on('broadcast', { event: NetEvent.LOBBY }, ({ payload }) =>
-      this.forwardIfOpponent(payload as LobbyMessage, 'lobby')
-    );
-    channel.on('broadcast', { event: NetEvent.MATCH }, ({ payload }) =>
-      this.forwardIfOpponent(payload as MatchMessage, 'match')
-    );
+    channel.on('broadcast', { event: NetEvent.LOBBY }, ({ payload }) => {
+      const msg = payload as LobbyMessage;
+      if (!msg || !msg.playerId) return;
+      if (this.slot && msg.playerId === this.slot) return;
+
+      // Update room state from the fast-path broadcast
+      const existing = this.roomState.players[msg.playerId];
+      this.roomState.players[msg.playerId] = {
+        slot: msg.playerId,
+        clientId: existing?.clientId ?? 'remote',
+        connected: true,
+        character: msg.character,
+        ready: msg.ready,
+        cameraEnabled: msg.cameraEnabled,
+        faceDetected: msg.faceDetected,
+        handDetected: msg.handDetected
+      };
+
+      if (this.isBothReady()) {
+        this.roomState.matchState = 'BOTH_READY';
+      }
+
+      this.events.emit('lobby', msg);
+      this.events.emit('roomState', this.roomState);
+    });
+    channel.on('broadcast', { event: NetEvent.MATCH }, ({ payload }) => {
+      const msg = payload as MatchMessage;
+      if (!msg) return;
+      if (this.slot && msg.playerId === this.slot) return;
+
+      if (msg.kind === 'START_MATCH') {
+        if (msg.p1Character && this.roomState.players.p1) this.roomState.players.p1.character = msg.p1Character;
+        if (msg.p2Character && this.roomState.players.p2) this.roomState.players.p2.character = msg.p2Character;
+        this.roomState.matchState = 'COUNTDOWN';
+      }
+
+      this.events.emit('match', msg);
+      this.events.emit('roomState', this.roomState);
+    });
 
     this.channel = channel;
 
@@ -400,8 +479,6 @@ export class RoomSession {
       channel.subscribe((status) => {
         if (status === 'SUBSCRIBED') {
           if (this.hasSubscribedOnce) {
-            // We dropped and came back - the server forgot our presence entry,
-            // so bypass the change-cache and re-track unconditionally.
             this.lastTrackedMeta = JSON.stringify(this.meta);
             void this.trackPresence();
           }
@@ -426,11 +503,7 @@ export class RoomSession {
     event: K
   ): void {
     if (!payload || !payload.playerId) return;
-    // broadcast self:false means everything we receive is from the other
-    // client. If it carries OUR slot, the two clients somehow claimed the same
-    // slot - drop it (applying it would drive the wrong fighter) and shout.
     if (this.slot && payload.playerId === this.slot) {
-      console.error('SLOT CONFLICT: opponent message arrived with our own slot', this.slot, payload);
       return;
     }
     this.events.emit(event, payload as RoomEvents[K]);
@@ -458,48 +531,126 @@ export class RoomSession {
       });
     }
 
-    members.sort((a, b) => a.joinedAt - b.joinedAt || a.clientId.localeCompare(b.clientId));
     return members;
   }
 
   private onPresenceSync(): void {
     if (!this.channel) return;
-    // Slots are STICKY: assigned exactly once when the room is created/joined
-    // (first player = p1, second = p2) and never re-derived. Presence flaps -
-    // a briefly missing entry after a lost diff or a reconnect - must not move
-    // a player into the other slot, or both clients end up filtering each
-    // other's messages as their own.
     this.publishSnapshot(this.readMembers());
   }
 
   private publishSnapshot(preloaded?: PresenceMeta[]): void {
     const members = preloaded ?? this.readMembers();
-    const withSlots: PresenceMeta[] = members.map((m, idx) => ({
-      ...m,
-      slot: m.slot ?? (idx === 0 ? 'p1' : idx === 1 ? 'p2' : null)
-    }));
+    const otherMembers = members.filter((m) => m.clientId !== this.clientId);
+    const opponentMeta = otherMembers[0] ?? null;
+
+    // Slot-based assignment:
+    // Local player is always this.slot
+    // Opponent is always otherSlot(this.slot)
+    let p1Meta: PresenceMeta | null = null;
+    let p2Meta: PresenceMeta | null = null;
+
+    if (this.slot === 'p1') {
+      p1Meta = { ...this.meta, slot: 'p1' };
+      p2Meta = opponentMeta ? { ...opponentMeta, slot: 'p2' } : null;
+    } else if (this.slot === 'p2') {
+      p2Meta = { ...this.meta, slot: 'p2' };
+      p1Meta = opponentMeta ? { ...opponentMeta, slot: 'p1' } : null;
+    }
+
+    const withSlots: PresenceMeta[] = [];
+    if (p1Meta) withSlots.push(p1Meta);
+    if (p2Meta) withSlots.push(p2Meta);
 
     const snapshot: RoomSnapshot = {
       roomCode: this.roomCode ?? '',
       members: withSlots,
-      p1: withSlots.find((m) => m.slot === 'p1') ?? null,
-      p2: withSlots.find((m) => m.slot === 'p2') ?? null,
-      opponentPresent: withSlots.some((m) => m.clientId !== this.clientId)
+      p1: p1Meta,
+      p2: p2Meta,
+      opponentPresent: otherMembers.length > 0
     };
+
+    // Synchronize into RoomState
+    if (this.slot === 'p1') {
+      this.roomState.players.p1 = {
+        slot: 'p1',
+        clientId: this.clientId,
+        connected: true,
+        character: this.meta.character,
+        ready: this.meta.ready,
+        cameraEnabled: this.meta.cameraEnabled,
+        faceDetected: this.meta.faceDetected,
+        handDetected: this.meta.handDetected
+      };
+      if (p2Meta) {
+        const existingP2 = this.roomState.players.p2;
+        this.roomState.players.p2 = {
+          slot: 'p2',
+          clientId: p2Meta.clientId,
+          connected: true,
+          character: p2Meta.character ?? existingP2?.character ?? 'KIRA',
+          ready: p2Meta.ready ?? existingP2?.ready ?? false,
+          cameraEnabled: p2Meta.cameraEnabled ?? existingP2?.cameraEnabled ?? false,
+          faceDetected: p2Meta.faceDetected ?? existingP2?.faceDetected ?? false,
+          handDetected: p2Meta.handDetected ?? existingP2?.handDetected ?? false
+        };
+      }
+    } else if (this.slot === 'p2') {
+      this.roomState.players.p2 = {
+        slot: 'p2',
+        clientId: this.clientId,
+        connected: true,
+        character: this.meta.character,
+        ready: this.meta.ready,
+        cameraEnabled: this.meta.cameraEnabled,
+        faceDetected: this.meta.faceDetected,
+        handDetected: this.meta.handDetected
+      };
+      if (p1Meta) {
+        const existingP1 = this.roomState.players.p1;
+        this.roomState.players.p1 = {
+          slot: 'p1',
+          clientId: p1Meta.clientId,
+          connected: true,
+          character: p1Meta.character ?? existingP1?.character ?? 'JACK',
+          ready: p1Meta.ready ?? existingP1?.ready ?? false,
+          cameraEnabled: p1Meta.cameraEnabled ?? existingP1?.cameraEnabled ?? false,
+          faceDetected: p1Meta.faceDetected ?? existingP1?.faceDetected ?? false,
+          handDetected: p1Meta.handDetected ?? existingP1?.handDetected ?? false
+        };
+      }
+    }
+
+    if (this.isBothReady()) {
+      this.roomState.matchState = 'BOTH_READY';
+    }
 
     this.lastSnapshot = snapshot;
     this.events.emit('presence', snapshot);
+    this.events.emit('roomState', this.roomState);
   }
 
   private assignSlot(slot: PlayerSlot): void {
     this.slot = slot;
     this.meta.slot = slot;
-    // Sensible default so the lobby opens on JACK vs KIRA rather than a mirror
-    // match. The player can still pick either fighter.
     if (!this.characterPickedByPlayer) {
       this.meta.character = slot === 'p1' ? 'JACK' : 'KIRA';
     }
+
+    const existing = this.roomState.players[slot];
+    this.roomState.players[slot] = {
+      slot,
+      clientId: this.clientId,
+      connected: true,
+      character: this.meta.character,
+      ready: existing?.ready ?? false,
+      cameraEnabled: this.meta.cameraEnabled,
+      faceDetected: this.meta.faceDetected,
+      handDetected: this.meta.handDetected
+    };
+
     this.events.emit('slot', slot);
+    this.events.emit('roomState', this.roomState);
   }
 
   private async trackPresence(): Promise<void> {
@@ -521,4 +672,3 @@ export class RoomSession {
     return new Promise((resolve) => window.setTimeout(resolve, ms));
   }
 }
-

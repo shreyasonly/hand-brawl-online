@@ -131,6 +131,37 @@ export interface PresenceMeta {
   handDetected: boolean;
 }
 
+export type MatchPhase =
+  | 'WAITING'
+  | 'CHARACTER_SELECT'
+  | 'READY'
+  | 'BOTH_READY'
+  | 'COUNTDOWN'
+  | 'FIGHTING'
+  | 'ROUND_END'
+  | 'MATCH_END';
+
+export interface PlayerState {
+  slot: PlayerSlot;
+  clientId: string;
+  connected: boolean;
+  character: CharacterId;
+  ready: boolean;
+  cameraEnabled: boolean;
+  faceDetected: boolean;
+  handDetected: boolean;
+}
+
+export interface RoomState {
+  roomId: string;
+  players: {
+    p1: PlayerState | null;
+    p2: PlayerState | null;
+  };
+  matchState: MatchPhase;
+}
+
 export const otherSlot = (slot: PlayerSlot): PlayerSlot => (slot === 'p1' ? 'p2' : 'p1');
 export const slotToIndex = (slot: PlayerSlot): 1 | 2 => (slot === 'p1' ? 1 : 2);
 export const indexToSlot = (index: 1 | 2): PlayerSlot => (index === 1 ? 'p1' : 'p2');
+
