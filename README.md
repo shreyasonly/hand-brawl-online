@@ -245,6 +245,7 @@ tab) ends the match immediately instead of making the opponent wait.
 | `npm run typecheck` | `tsc --noEmit` |
 | `npm run test:gestures` | Score every canonical hand pose against the real gesture descriptions |
 | `node tests/e2e-online.cjs` | Two-browser online match E2E (needs dev + dev:server running) |
+| `node scripts/go-live.cjs <server-url>` | After deploying the game server once: verifies it, sets the Vercel env var and redeploys the frontend |
 
 ---
 
