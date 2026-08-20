@@ -1,6 +1,6 @@
 import { InputManager } from '../input/InputManager';
 import { VisionPipeline } from '../vision/VisionPipeline';
-import { RoomSession } from '../net/RoomSession';
+import { GameServerSession } from '../net/GameServerSession';
 import { CharacterId } from '../net/Protocol';
 import { ROUNDS_TO_WIN } from '../config/Constants';
 
@@ -33,7 +33,7 @@ export class GameManager {
   public mode: MatchMode = 'PRACTICE';
 
   public readonly vision = VisionPipeline.getInstance();
-  public readonly room = RoomSession.getInstance();
+  public readonly room = GameServerSession.getInstance();
   public readonly inputManager = new InputManager();
 
   public p1Character: CharacterId = 'JACK';
@@ -67,11 +67,12 @@ export class GameManager {
   }
 
   /**
-   * PLAYER 1 drives round flow, the clock and the winner so the two browsers
-   * cannot disagree about the score. PLAYER 2 follows what it is told.
+   * ONLINE   : the Colyseus SERVER drives round flow, the clock and the winner
+   *            - BOTH browsers are followers, so the screens cannot disagree.
+   * PRACTICE : this browser simulates everything itself.
    */
   public get isMatchAuthority(): boolean {
-    return this.mode === 'PRACTICE' || this.room.slot === 'p1';
+    return this.mode === 'PRACTICE';
   }
 
   public get localCharacter(): CharacterId {

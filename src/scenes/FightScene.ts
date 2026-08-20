@@ -35,8 +35,10 @@ import {
  *   - resolves ONLY the hits its own fighter throws and reports them,
  *   - re-syncs the opponent's fighter from that player's STATE snapshots.
  *
- * PLAYER 1 additionally owns the round clock, round results and the winner so
- * the two screens can never disagree about the score.
+ * ONLINE, the Colyseus GAME SERVER owns the countdown, the round clock, the
+ * authoritative health, round results, the winner and connectivity - both
+ * browsers are followers, so the two screens can never disagree.
+ * In PRACTICE mode this browser simulates all of that locally.
  */
 export class FightScene extends Phaser.Scene {
   private p1!: Character;
@@ -66,14 +68,10 @@ export class FightScene extends Phaser.Scene {
   private syncWatchdog: number | null = null;
   private lastProgressAt = 0;
 
-  /**
-   * Timestamp when presence first reported the opponent absent.
-   * null when the opponent is considered present.
-   * The fight is only paused after DISCONNECT_GRACE_MS of combined
-   * presence absence AND input silence.
-   */
-  private opponentMissingSince: number | null = null;
-  private static readonly DISCONNECT_GRACE_MS = 5000;
+  /** Set when the server declared the opponent gone for good. */
+  private opponentLeft = false;
+  /** True while the disconnect overlay is about OUR socket, not theirs. */
+  private ownConnectionLost = false;
 
   private localRematch = false;
   private remoteRematch = false;
@@ -116,7 +114,8 @@ export class FightScene extends Phaser.Scene {
     this.ignoreStateUntil = 0;
     this.lastLocalHitAt = 0;
     this.announcedRound = 0;
-    this.opponentMissingSince = null;
+    this.opponentLeft = false;
+    this.ownConnectionLost = false;
 
     const dom = DomUI.getInstance();
     dom.showCameraPip(gm.vision.camera.state === 'READY');
@@ -170,17 +169,21 @@ export class FightScene extends Phaser.Scene {
       }
     });
 
-    // Follower watchdog: if PLAYER 1's ROUND_START never arrives (all three
-    // packets lost, or we joined the scene late), ask for the current state
-    // instead of waiting forever on the announcer text.
-    if (gm.isOnline && !gm.isMatchAuthority) {
+    // Watchdog: if the server's ROUND_START never arrives (we loaded the scene
+    // late, or reconnected mid-round), ask for the current state instead of
+    // waiting forever on the announcer text.
+    if (gm.isOnline) {
       this.lastProgressAt = Date.now();
       this.syncWatchdog = window.setInterval(() => {
+        // FIGHT_ROUND_END and FIGHT_MATCH_END are legitimate quiet stretches:
+        // the server deliberately waits out the K.O. presentation.
         const stuck =
           !this.isRoundActive &&
           gm.currentState !== GameState.FIGHT_MATCH_END &&
+          gm.currentState !== GameState.FIGHT_ROUND_END &&
           Date.now() - this.lastProgressAt > 3500;
         if (stuck && gm.room.slot) {
+          console.log('[NEED_STATE] asking the server to re-sync the round');
           gm.room.sendMatch({
             type: 'MATCH',
             playerId: gm.room.slot,
@@ -192,17 +195,14 @@ export class FightScene extends Phaser.Scene {
     }
 
     // 7. Round 1.
-    // PLAYER 1 waits a beat before announcing: PLAYER 2 reaches this scene a
-    // network hop later, and would otherwise miss the very first ROUND_START.
-    if (gm.isMatchAuthority) {
-      if (gm.isOnline) {
-        this.announcerText.setText('SYNCING...');
-        this.time.delayedCall(900, () => this.startRoundSequence(gm.currentRound));
-      } else {
-        this.startRoundSequence(gm.currentRound);
-      }
+    // ONLINE   : tell the server this scene is loaded; it starts the countdown
+    //            once BOTH clients (or a timeout) are ready.
+    // PRACTICE : start immediately.
+    if (gm.isOnline) {
+      this.announcerText.setText('SYNCING...');
+      gm.room.sendFightReady();
     } else {
-      this.announcerText.setText('WAITING FOR PLAYER 1...');
+      this.startRoundSequence(gm.currentRound);
     }
   }
 
@@ -237,42 +237,19 @@ export class FightScene extends Phaser.Scene {
 
     this.unsubscribers.push(
       gm.room.events.on('state', (msg) => {
-        console.log('[REMOTE STATE RECEIVED]', {
-          playerId: msg.playerId,
-          timestamp: msg.timestamp
-        });
-        // Receiving a STATE packet proves the opponent is alive - cancel any
-        // disconnect grace timer.
-        if (this.opponentMissingSince !== null) {
-          console.log('[DISCONNECT GRACE CANCELLED] (state received)');
-          this.opponentMissingSince = null;
-          this.setDisconnected(false);
-        }
         this.remoteSnapshot = msg;
       }),
       gm.room.events.on('hit', (msg) => this.onRemoteHit(msg)),
       gm.room.events.on('match', (msg) => this.onMatchMessage(msg)),
-      gm.room.events.on('presence', (snapshot) => {
-        console.log('[PRESENCE]', {
-          opponentPresent: snapshot.opponentPresent,
-          members: snapshot.members.map((m) => ({ slot: m.slot, clientId: m.clientId.slice(0, 8) }))
-        });
-        // A single presence diff does NOT immediately pause the game.
-        // Start the grace period if the opponent appears absent; cancel it
-        // if they return. Actual pausing happens in update() after the timer.
-        if (!snapshot.opponentPresent) {
-          if (this.opponentMissingSince === null) {
-            console.log('[DISCONNECT GRACE START]');
-            this.opponentMissingSince = Date.now();
-          }
-        } else {
-          if (this.opponentMissingSince !== null) {
-            console.log('[DISCONNECT GRACE CANCELLED] (presence restored)');
-            this.opponentMissingSince = null;
-          }
-          this.setDisconnected(false);
-        }
+      // Authoritative HP echo for hits WE landed - keeps our view of the
+      // opponent's health pinned to the server's number.
+      gm.room.events.on('hpSync', (msg) => {
+        const fighter = this.fighterFor(slotToIndex(msg.slot));
+        fighter.hp = Phaser.Math.Clamp(msg.hp, 0, fighter.maxHp);
       })
+      // Disconnect state is read straight from the server every frame in
+      // update() - the server's socket knowledge IS the truth, no local
+      // grace timers or presence guesswork needed.
     );
   }
 
@@ -339,20 +316,15 @@ export class FightScene extends Phaser.Scene {
 
     switch (msg.kind) {
       case 'ROUND_START':
+        // Server announces a round: reset the arena and wait for its
+        // COUNTDOWN ticks (3 / 2 / 1 / FIGHT).
         this.lastProgressAt = Date.now();
         gm.applyAuthoritativeScore(msg.p1Wins ?? 0, msg.p2Wins ?? 0, msg.round ?? 1);
-        this.startRoundSequence(msg.round ?? 1);
+        this.prepareRound(msg.round ?? 1);
         break;
 
-      case 'NEED_STATE':
-        // The other laptop missed the round announcement - re-send it.
-        if (gm.isMatchAuthority) {
-          this.broadcastMatch('ROUND_START', {
-            round: gm.currentRound,
-            p1Wins: gm.p1RoundWins,
-            p2Wins: gm.p2RoundWins
-          });
-        }
+      case 'COUNTDOWN':
+        this.onServerCountdown(msg.value ?? '');
         break;
 
       case 'TIMER':
@@ -362,29 +334,66 @@ export class FightScene extends Phaser.Scene {
         break;
 
       case 'ROUND_END':
+        this.lastProgressAt = Date.now();
         gm.applyAuthoritativeScore(msg.p1Wins ?? gm.p1RoundWins, msg.p2Wins ?? gm.p2RoundWins, msg.round ?? gm.currentRound);
         if (msg.roundWinner) this.presentRoundEnd(msg.roundWinner, false);
         break;
 
       case 'MATCH_END':
+        if (msg.reason === 'OPPONENT_LEFT') {
+          this.opponentLeft = true;
+        }
         if (msg.matchWinner) {
           gm.applyAuthoritativeScore(msg.p1Wins ?? 0, msg.p2Wins ?? 0, msg.round ?? 1);
           this.presentMatchEnd(msg.matchWinner);
         }
         break;
 
+      case 'ROUND_STATE':
+        // Full re-sync after our reconnect (or a very late scene load).
+        this.applyRoundStateSnapshot(msg);
+        break;
+
       case 'REMATCH_REQUEST':
         this.remoteRematch = true;
         this.updateRematchPrompt();
-        this.tryStartRematch();
         break;
 
-      case 'REMATCH_ACCEPT':
+      case 'REMATCH_START':
+        // The server confirmed both players want a rematch.
         this.performRematch();
         break;
 
       default:
         break;
+    }
+  }
+
+  /** Applies the server's ROUND_STATE snapshot after a reconnect. */
+  private applyRoundStateSnapshot(msg: MatchMessage): void {
+    const gm = GameManager.getInstance();
+    this.lastProgressAt = Date.now();
+    gm.applyAuthoritativeScore(
+      msg.p1Wins ?? gm.p1RoundWins,
+      msg.p2Wins ?? gm.p2RoundWins,
+      msg.round ?? gm.currentRound
+    );
+
+    if (typeof msg.secondsLeft === 'number') {
+      this.roundTimer = msg.secondsLeft;
+      this.timerText.setText(`${Math.max(0, this.roundTimer)}`);
+    }
+    if (typeof msg.p1Hp === 'number') this.p1.hp = Phaser.Math.Clamp(msg.p1Hp, 0, this.p1.maxHp);
+    if (typeof msg.p2Hp === 'number') this.p2.hp = Phaser.Math.Clamp(msg.p2Hp, 0, this.p2.maxHp);
+
+    // Mid-round reconnect: skip the countdown and resume fighting right away.
+    if (msg.phase === 'FIGHTING' && msg.roundActive && !this.isRoundActive) {
+      if (this.announcedRound !== (msg.round ?? gm.currentRound)) {
+        this.announcedRound = msg.round ?? gm.currentRound;
+        this.roundTitleText.setText(`ROUND ${this.announcedRound}`);
+      }
+      this.announcerText.setAlpha(0);
+      this.beginRound();
     }
   }
 
@@ -437,17 +446,22 @@ export class FightScene extends Phaser.Scene {
     );
   }
 
-  private setDisconnected(disconnected: boolean): void {
-    if (this.isPausedForDisconnect === disconnected) return;
+  private setDisconnected(disconnected: boolean, ownConnection = false): void {
+    if (this.isPausedForDisconnect === disconnected && this.ownConnectionLost === ownConnection) {
+      return;
+    }
     this.isPausedForDisconnect = disconnected;
+    this.ownConnectionLost = ownConnection;
 
     this.disconnectText.setVisible(disconnected);
     if (disconnected) {
-      this.disconnectText.setText('OPPONENT DISCONNECTED\nWAITING FOR THEM TO RECONNECT...\n[ESC] LEAVE MATCH');
-    } else {
-      // When the opponent reconnects, reset the grace timer so a subsequent
-      // real disconnect can be detected fresh.
-      this.opponentMissingSince = null;
+      if (ownConnection) {
+        console.log('[CONNECTION LOST] our own socket dropped');
+        this.disconnectText.setText('CONNECTION LOST\nRECONNECTING TO THE GAME SERVER...\n[ESC] LEAVE MATCH');
+      } else {
+        console.log('[OPPONENT DISCONNECTED] (server-confirmed)');
+        this.disconnectText.setText('OPPONENT DISCONNECTED\nWAITING FOR THEM TO RECONNECT...\n[ESC] LEAVE MATCH');
+      }
     }
   }
 
@@ -455,9 +469,10 @@ export class FightScene extends Phaser.Scene {
   // Round flow
   // ---------------------------------------------------------------------------
 
-  private startRoundSequence(round: number): void {
+  /** Shared per-round reset. Returns false when this round was already prepared. */
+  private prepareRound(round: number): boolean {
     const gm = GameManager.getInstance();
-    if (this.announcedRound === round) return; // duplicate ROUND_START
+    if (this.announcedRound === round) return false; // duplicate ROUND_START
     this.announcedRound = round;
 
     gm.currentState = GameState.FIGHT_ROUND_START;
@@ -478,22 +493,15 @@ export class FightScene extends Phaser.Scene {
     this.ignoreStateUntil = performance.now() + 800;
     this.remoteSnapshot = null;
 
-    if (gm.isMatchAuthority && gm.isOnline) {
-      // Sent three times: a single dropped packet must not strand PLAYER 2 on
-      // the "waiting" screen. The receiver ignores duplicates for the round.
-      const announce = () =>
-        this.broadcastMatch('ROUND_START', {
-          round,
-          p1Wins: gm.p1RoundWins,
-          p2Wins: gm.p2RoundWins
-        });
-      announce();
-      this.time.delayedCall(350, announce);
-      this.time.delayedCall(750, announce);
-    }
-
     this.announcerText.setAlpha(1);
     this.announcerText.setText(`ROUND ${round}`);
+    return true;
+  }
+
+  /** PRACTICE only: run the whole round intro locally. Online rounds are paced
+   *  by the server's COUNTDOWN messages instead. */
+  private startRoundSequence(round: number): void {
+    if (!this.prepareRound(round)) return;
 
     // 3 - 2 - 1 - FIGHT!
     const countdown = ['3', '2', '1'];
@@ -513,6 +521,24 @@ export class FightScene extends Phaser.Scene {
         this.beginRound();
       });
     });
+  }
+
+  /** ONLINE: one server-paced countdown tick ('3' | '2' | '1' | 'FIGHT'). */
+  private onServerCountdown(value: string): void {
+    this.lastProgressAt = Date.now();
+    this.announcerText.setAlpha(1);
+
+    if (value === 'FIGHT') {
+      this.announcerText.setText('FIGHT!');
+      SoundManager.getInstance().playSpecial();
+      this.time.delayedCall(600, () => {
+        this.tweens.add({ targets: this.announcerText, alpha: 0, duration: 300 });
+      });
+      this.beginRound();
+    } else {
+      this.announcerText.setText(value);
+      SoundManager.getInstance().playMenuSelect();
+    }
   }
 
   private beginRound(): void {
@@ -603,8 +629,12 @@ export class FightScene extends Phaser.Scene {
     }
 
     if (!gm.isMatchAuthority) {
-      // The follower waits for PLAYER 1 to announce the next round.
-      this.time.delayedCall(1800, () => this.announcerText.setText('NEXT ROUND...'));
+      // Online: wait for the SERVER to announce the next round (or MATCH_END).
+      this.time.delayedCall(1800, () => {
+        if (gm.currentState === GameState.FIGHT_ROUND_END) {
+          this.announcerText.setText('NEXT ROUND...');
+        }
+      });
       return;
     }
 
@@ -663,6 +693,7 @@ export class FightScene extends Phaser.Scene {
     const gm = GameManager.getInstance();
     if (gm.currentState !== GameState.FIGHT_MATCH_END) return;
     if (this.localRematch) return;
+    if (gm.isOnline && this.opponentLeft) return; // nobody left to rematch
 
     this.localRematch = true;
     SoundManager.getInstance().playMenuSelect();
@@ -701,6 +732,11 @@ export class FightScene extends Phaser.Scene {
       return;
     }
 
+    if (this.opponentLeft) {
+      this.rematchPrompt.setText('OPPONENT LEFT THE MATCH   |   [ESC] MENU');
+      return;
+    }
+
     if (this.localRematch && !this.remoteRematch) {
       this.rematchPrompt.setText('REMATCH REQUESTED - WAITING FOR OPPONENT...');
     } else if (!this.localRematch && this.remoteRematch) {
@@ -727,49 +763,16 @@ export class FightScene extends Phaser.Scene {
     gm.inputManager.update();
 
     if (gm.isOnline) {
-      const presenceMissing =
-        gm.room.lastSnapshot !== null && !gm.room.lastSnapshot.opponentPresent;
-      const inputAlive = gm.inputManager.isOpponentResponsive;
-
-      if (!presenceMissing && inputAlive) {
-        // Opponent is demonstrably connected on both channels.
-        if (this.opponentMissingSince !== null) {
-          console.log('[DISCONNECT GRACE CANCELLED] (update: all signals green)');
-          this.opponentMissingSince = null;
-        }
+      // The SERVER knows whether each websocket is connected - no presence
+      // guesswork, no grace timers on the client. `connected` only flips to
+      // false when the opponent's socket has actually dropped (and the server
+      // is already holding their slot open for the reconnect window).
+      if (gm.currentState === GameState.FIGHT_MATCH_END) {
         this.setDisconnected(false);
-      } else if (presenceMissing && !inputAlive) {
-        // Both channels are dark - start/continue the grace timer.
-        if (this.opponentMissingSince === null) {
-          console.log('[DISCONNECT GRACE START]');
-          this.opponentMissingSince = Date.now();
-        }
-        const silentMs = Date.now() - this.opponentMissingSince;
-        console.log('[CONNECTION CHECK]', {
-          slot: gm.room.slot,
-          opponentPresent: gm.room.lastSnapshot?.opponentPresent,
-          opponentResponsive: inputAlive,
-          opponentSilentMs: gm.inputManager.opponentSilentMs,
-          opponentMissingSince: silentMs
-        });
-        if (silentMs >= FightScene.DISCONNECT_GRACE_MS) {
-          console.log('[OPPONENT ACTUALLY DISCONNECTED]');
-          this.setDisconnected(true);
-        }
+      } else if (gm.room.status === 'RECONNECTING') {
+        this.setDisconnected(true, true);
       } else {
-        // Only one channel is dark (e.g. presence flap but INPUT still live,
-        // or input briefly silent but presence shows them present).
-        // Not enough evidence to pause - keep the grace timer running if it
-        // started, but don't fire setDisconnected(true) yet.
-        if (this.opponentMissingSince !== null) {
-          const silentMs = Date.now() - this.opponentMissingSince;
-          if (silentMs >= FightScene.DISCONNECT_GRACE_MS) {
-            console.log('[OPPONENT ACTUALLY DISCONNECTED]');
-            this.setDisconnected(true);
-          }
-        } else {
-          this.setDisconnected(false);
-        }
+        this.setDisconnected(!gm.room.opponentConnected);
       }
     }
 

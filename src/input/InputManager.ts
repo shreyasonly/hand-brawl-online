@@ -1,6 +1,6 @@
 import { Action } from '../gestures/GestureConfig';
 import { GestureIntent, EMPTY_INTENT } from '../gestures/GestureSmoother';
-import { RoomSession } from '../net/RoomSession';
+import { GameServerSession } from '../net/GameServerSession';
 import { InputMessage, PlayerSlot, slotToIndex } from '../net/Protocol';
 import { NET } from '../config/Constants';
 
@@ -74,7 +74,7 @@ const HOLD_ACTIONS = new Set<Action>([Action.MOVE_LEFT, Action.MOVE_RIGHT, Actio
  * the network.
  */
 export class InputManager {
-  private room = RoomSession.getInstance();
+  private room = GameServerSession.getInstance();
 
   private mode: InputMode = 'PRACTICE';
 

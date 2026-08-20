@@ -2,7 +2,7 @@ import Phaser from 'phaser';
 import { GameManager, GameState } from '../game/GameManager';
 import { SoundManager } from '../audio/SoundManager';
 import { DomUI } from '../ui/DomUI';
-import { RoomSnapshot } from '../net/RoomSession';
+import { RoomSnapshot } from '../net/GameServerSession';
 
 interface LobbyInit {
   intent: 'CREATE' | 'JOIN';
@@ -77,7 +77,7 @@ export class LobbyScene extends Phaser.Scene {
     this.copyBtn.on('pointerdown', () => void this.copyCode());
 
     this.statusText = this.add
-      .text(320, 150, 'CONNECTING TO SUPABASE REALTIME...', {
+      .text(320, 150, 'CONNECTING TO THE GAME SERVER...', {
         fontFamily: '"VT323", monospace',
         fontSize: '21px',
         color: '#ffb703',

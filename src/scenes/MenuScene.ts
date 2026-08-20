@@ -2,7 +2,7 @@ import Phaser from 'phaser';
 import { GameManager, GameState } from '../game/GameManager';
 import { SoundManager } from '../audio/SoundManager';
 import { DomUI } from '../ui/DomUI';
-import { isSupabaseConfigured, supabaseConfigError } from '../net/SupabaseClient';
+import { isGameServerConfigured, gameServerConfigError } from '../net/GameServerSession';
 
 interface MenuOption {
   label: string;
@@ -62,7 +62,7 @@ export class MenuScene extends Phaser.Scene {
       })
       .setOrigin(0.5);
 
-    const online = isSupabaseConfigured();
+    const online = isGameServerConfigured();
 
     this.menuOptions = [
       {
@@ -122,7 +122,7 @@ export class MenuScene extends Phaser.Scene {
 
     if (!online) {
       this.noticeText.setText(
-        `${supabaseConfigError() ?? 'SUPABASE NOT CONFIGURED'}\nONLINE PLAY DISABLED - PRACTICE MODE STILL WORKS`
+        `${gameServerConfigError() ?? 'GAME SERVER NOT CONFIGURED'}\nONLINE PLAY DISABLED - PRACTICE MODE STILL WORKS`
       );
       // Land the cursor on the first option the player can actually pick.
       this.selectedIndex = 2;
@@ -167,7 +167,7 @@ export class MenuScene extends Phaser.Scene {
 
     if (!option.enabled) {
       this.noticeText.setText(
-        `${supabaseConfigError() ?? 'ONLINE UNAVAILABLE'}\nADD YOUR SUPABASE KEYS TO PLAY ONLINE`
+        `${gameServerConfigError() ?? 'ONLINE UNAVAILABLE'}\nSET VITE_GAME_SERVER_URL TO PLAY ONLINE`
       );
       return;
     }

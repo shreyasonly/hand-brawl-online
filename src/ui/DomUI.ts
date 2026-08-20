@@ -1,5 +1,5 @@
 import { VisionStatus } from '../vision/VisionPipeline';
-import { ConnectionStatus } from '../net/RoomSession';
+import { ConnectionStatus } from '../net/GameServerSession';
 
 /**
  * Thin wrapper around the HTML chrome that sits on top of the Phaser canvas:

@@ -6,21 +6,19 @@ An online 2-player pixel-art fighting game controlled with hand gestures.
 
 ```
                     GitHub
-                       |
-                    Vercel
-                       |
-             HAND BRAWL WEBSITE
-                       |
-              Supabase Realtime
-              /                \
-       PLAYER 1                PLAYER 2
-       LAPTOP                  LAPTOP
-       webcam                  webcam
-       TF.js + MediaPipe       TF.js + MediaPipe
-       hand gestures           hand gestures
-       JACK                    KIRA
-              \                /
-                 SAME MATCH
+                       |            git push deploys BOTH:
+          +------------+------------+
+          |                         |
+       Vercel                 Render (or any Node host)
+          |                         |
+  HAND BRAWL WEBSITE       COLYSEUS GAME SERVER
+  (Phaser + vision)        (Node + TS, ws://)
+          |                         |
+   PLAYER 1   PLAYER 2   <----------+
+   LAPTOP     LAPTOP        one authoritative GameRoom
+   webcam     webcam        slots · ready · countdown ·
+   MediaPipe  MediaPipe     round clock · health · score ·
+   gestures   gestures      disconnect/reconnect truth
 ```
 
 Each browser runs its own computer vision locally and sends **only gameplay
@@ -36,8 +34,8 @@ Camera  ->  HandTracker      (TensorFlow.js + MediaPipe Hands, 1 hand)
         ->  GestureSmoother   (debounce, cooldowns, dead zone)
         ->  GameAction
         ->  InputManager
-        ->  RoomSession
-        ->  Supabase Realtime  (broadcast + presence)
+        ->  GameServerSession (WebSocket)
+        ->  COLYSEUS GameRoom  (validates, updates authoritative state)
         ->  Opponent's InputManager
         ->  Phaser
 ```
@@ -50,36 +48,38 @@ nothing about Phaser. Phaser only ever sees a `PlayerInputState`.
 The camera on your laptop controls **your fighter only**. There is no
 "left hand = P1, right hand = P2" — the hand detector is hard-limited to a
 single hand (`maxHands: 1`), and the opponent's fighter is driven purely by
-messages arriving over Supabase Realtime.
+messages arriving from the Colyseus game server.
 
 ### Who is Player 1?
 
-The **room** decides, never the client:
+The **server** decides, never the client:
 
 | Action | What happens |
 | --- | --- |
-| `CREATE LOBBY` | Subscribe to a fresh channel, confirm via presence that the room is empty → you are the first player → **PLAYER 1** |
-| `JOIN LOBBY` | Subscribe to that room's channel, confirm via presence that exactly one player is already there → you are the second player → **PLAYER 2** |
-| 0 players present | `ROOM NOT FOUND` |
-| 2 players present | `ROOM IS FULL` |
+| `CREATE LOBBY` | The Colyseus server creates a `GameRoom` keyed by a 6-character code → you are the first session → **PLAYER 1** |
+| `JOIN LOBBY` | Colyseus matches the code to the existing room → you are the second session → **PLAYER 2**, and the room locks |
+| Wrong code / room full | `ROOM NOT FOUND (OR ALREADY FULL)` |
 
-Afterwards both browsers re-derive the slots from the same shared presence
-state (ordered by join time, tie-broken by client id), so they can never
-disagree.
+Slots are sticky: the server remembers `sessionId -> slot`, so even after a
+reconnect you come back as the same player.
 
 ### Match authority
 
-Both browsers simulate the fight, so authority is split to keep them honest:
+The local fighter is simulated locally so controls feel instant; everything
+both screens must AGREE on comes from the server:
 
 | Concern | Owner |
 | --- | --- |
-| Your fighter's movement + animation | your browser |
-| Hits **your** fighter lands | your browser (broadcast as `HIT`) |
-| Your fighter's position/HP snapshot | your browser (`STATE`, 10 Hz) |
-| Round clock, round results, winner | **PLAYER 1** (`MATCH` messages) |
+| Your fighter's movement + animation | your browser (instant, no round-trip) |
+| Hits **your** fighter lands | your browser resolves, the **server validates** (damage caps, range, rate) and applies them to authoritative HP |
+| Your fighter's position snapshot | your browser (`state`, 10 Hz, relayed) |
+| Ready / match start / countdown | **SERVER** |
+| Round clock, KO, round results, winner | **SERVER** |
+| "Opponent disconnected" | **SERVER** (it owns the sockets - clients never guess) |
 
-Because each client only resolves hits thrown by the fighter it owns, a punch
-is never counted twice.
+Because each client only resolves hits thrown by the fighter it owns - and the
+server owns the resulting health - a punch is never counted twice and the two
+screens cannot drift.
 
 ---
 
@@ -116,69 +116,79 @@ PINCH is detected geometrically instead, because curl/direction cannot express
 ### 1. Install
 
 ```bash
-npm install
+npm install                # frontend
+cd server && npm install   # game server
 ```
 
-### 2. Create a Supabase project
-
-1. Create a free project at <https://supabase.com>.
-2. Open **Project Settings → API** and copy the **Project URL** and the
-   **anon / public** key.
-3. No database tables and no SQL are needed — the game uses Realtime
-   **broadcast** and **presence** only.
-
-### 3. Configure environment variables
+### 2. Run locally (two terminals)
 
 ```bash
-cp .env.example .env.local
+npm run dev:server   # Colyseus on ws://localhost:2567
+npm run dev          # vite on https://localhost:5000
 ```
 
-```env
-VITE_SUPABASE_URL=https://your-project-ref.supabase.co
-VITE_SUPABASE_ANON_KEY=your-anon-public-key
-```
-
-`.env.local` is git-ignored. **Never commit real keys, and never put the
-`service_role` key in this project** — it is a browser bundle.
-
-Without these variables the game still builds and runs; online play is disabled
-with an on-screen explanation and PRACTICE mode keeps working.
-
-### 4. Run locally
-
-```bash
-npm run dev
-```
+In dev the client connects to `ws://<page-hostname>:2567` automatically - no
+env vars needed on the same machine.
 
 The dev server runs over **HTTPS** (via `@vitejs/plugin-basic-ssl`) and binds to
 `0.0.0.0`, because `getUserMedia` requires a secure context. To test with two
 laptops on the same Wi-Fi, open `https://<your-lan-ip>:5000` on the second one
-and accept the self-signed certificate warning.
+and accept the self-signed certificate warning. (Browsers block `ws://` from an
+`https://` page for non-localhost hosts, so for LAN tests either use the
+deployed `wss://` server via `VITE_GAME_SERVER_URL`, or test with two browser
+windows on one machine.)
 
-### 5. Build
+### 3. Environment variables
+
+| Variable | Where | Value |
+| --- | --- | --- |
+| `VITE_GAME_SERVER_URL` | Vercel (Production/Preview) | `wss://<your-game-server>` e.g. `wss://hand-brawl-server.onrender.com` |
+| `VITE_GAME_SERVER_URL` | local `.env.local` (optional) | `ws://localhost:2567` (this is already the dev default) |
+
+Without it, a production build disables online play with an on-screen
+explanation and PRACTICE mode keeps working. Vite inlines `VITE_*` variables at
+**build** time - after changing them in Vercel you must redeploy.
+
+### 4. Build
 
 ```bash
-npm run build     # tsc + vite build -> dist/
-npm run preview   # serve the production build
+npm run build              # frontend: tsc + vite build -> dist/
+cd server && npm run build # server:   tsc -> dist/
+```
+
+### 5. Test online play end-to-end (two real browsers)
+
+```bash
+# with dev:server and dev running:
+node tests/e2e-online.cjs
 ```
 
 ---
 
-## Deploy to Vercel
+## Deploy
 
-1. Push this repository to GitHub.
-2. In Vercel, **Add New → Project** and import the repo.
-3. Vercel detects Vite automatically (`vercel.json` pins it anyway):
-   - Build command: `npm run build`
-   - Output directory: `dist`
-4. Add both environment variables under **Settings → Environment Variables**
-   (Production, Preview and Development):
-   - `VITE_SUPABASE_URL`
-   - `VITE_SUPABASE_ANON_KEY`
-5. Deploy. Vercel serves over HTTPS, so the webcam works out of the box.
+### Game server (Render - simplest path)
 
-> Vite inlines `VITE_*` variables at **build** time. After changing them in
-> Vercel you must redeploy for the change to take effect.
+`render.yaml` in the repo root is a ready-made blueprint:
+
+1. <https://dashboard.render.com> → **New → Blueprint** → connect this repo.
+2. Render creates the `hand-brawl-server` web service from `server/`.
+3. Copy the service URL, e.g. `https://hand-brawl-server.onrender.com`.
+
+Every future `git push` redeploys the server automatically. Any other Node
+host with a persistent process + WebSockets (Railway, Fly.io, a VPS, Colyseus
+Cloud) works the same way: `cd server && npm install && npm run build && npm start`
+with `PORT` provided by the host.
+
+> Free-plan note: Render spins the free instance down after ~15 idle minutes;
+> the next connection waits ~30-60s while it wakes. Upgrade if that bothers you.
+
+### Frontend (Vercel - unchanged)
+
+1. Keep the existing GitHub → Vercel integration; `npm run build` → `dist/`.
+2. Add **`VITE_GAME_SERVER_URL`** = `wss://<your-render-url>` under
+   **Settings → Environment Variables** (Production + Preview).
+3. Redeploy (or just push).
 
 ---
 
@@ -200,9 +210,12 @@ npm run preview   # serve the production build
 Then: `3 · 2 · 1 · FIGHT!` — best of 3 rounds, 60 seconds each. Press `R` (or
 click the prompt) for a rematch; both players must agree.
 
-If a player drops, the other sees `OPPONENT DISCONNECTED` and the match pauses
-until they come back. Supabase Realtime rejoins the channel automatically and
-presence is re-published on reconnect.
+If a player's connection drops, the **server** notices (it owns the sockets),
+pauses the round clock and tells the other player `OPPONENT DISCONNECTED`. The
+dropped client auto-reconnects with its reconnection token and resumes in the
+same slot with the same score. If they stay gone past the ~20s grace window,
+the remaining player wins the match. Deliberately leaving (ESC / closing the
+tab) ends the match immediately instead of making the opponent wait.
 
 ---
 
@@ -226,22 +239,31 @@ presence is re-published on reconnect.
 | Script | Purpose |
 | --- | --- |
 | `npm run dev` | HTTPS dev server on `0.0.0.0:5000` |
-| `npm run build` | Type-check then build to `dist/` |
+| `npm run dev:server` | Colyseus game server on `:2567` (watch mode) |
+| `npm run build` | Type-check then build the frontend to `dist/` |
 | `npm run preview` | Serve the production build |
 | `npm run typecheck` | `tsc --noEmit` |
 | `npm run test:gestures` | Score every canonical hand pose against the real gesture descriptions |
+| `node tests/e2e-online.cjs` | Two-browser online match E2E (needs dev + dev:server running) |
 
 ---
 
 ## Project layout
 
 ```
+server/
+  src/
+    index.ts                 Colyseus server bootstrap (+ /health endpoint)
+    rooms/GameRoom.ts        THE authority: slots, ready, countdown, clock,
+                             hit validation, health, score, reconnect grace
+    state/GameState.ts       replicated schema: GameState + PlayerState
 src/
   config/Constants.ts        tuning: arena, round rules, network cadence
   net/
     Protocol.ts              wire message types (gameplay intent only)
-    SupabaseClient.ts        Realtime client + env validation
-    RoomSession.ts           channel, presence, slot assignment, reconnect
+    GameServerSession.ts     WebSocket session to the Colyseus GameRoom
+    SupabaseClient.ts        (legacy, unused) old Supabase client
+    RoomSession.ts           (legacy, unused) old presence-based netcode
     Emitter.ts               tiny typed event emitter
   vision/
     CameraManager.ts         this laptop's webcam stream

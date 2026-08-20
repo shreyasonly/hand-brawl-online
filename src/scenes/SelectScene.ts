@@ -23,10 +23,9 @@ const IDLE_ANIM: Record<CharacterId, string> = {
 /**
  * Fighter select.
  *
- * ONLINE   : Each player picks their own fighter; choices and ready states
- *            are synchronized via Supabase Presence and fast-path Broadcast.
- *            When BOTH players are ready, either client can trigger START_MATCH
- *            safely and idempotently.
+ * ONLINE   : Each player picks their own fighter and sends READY to the game
+ *            server. The SERVER decides when both are ready and broadcasts
+ *            START_MATCH - the clients only follow.
  * PRACTICE : The local two-player select is preserved.
  */
 export class SelectScene extends Phaser.Scene {
@@ -160,12 +159,12 @@ export class SelectScene extends Phaser.Scene {
     if (gm.mode === 'ONLINE') {
       this.bindRoomEvents();
 
-      // Self-healing check on a DOM timer: re-evaluates ready state and start condition
+      // Self-healing UI refresh on a DOM timer (Phaser timers freeze in
+      // background tabs). Match start itself is the SERVER's job now.
       this.retryTimer = window.setInterval(() => {
         if (this.launching) return;
         this.syncFromRoomState();
         this.refresh();
-        this.tryStartOnlineMatch();
       }, 1000);
     }
 
@@ -259,13 +258,7 @@ export class SelectScene extends Phaser.Scene {
     });
 
     void gm.room.setReady(this.localReady);
-    console.log('[READY STATE]', {
-      slot: gm.room.slot,
-      localReady: this.localReady
-    });
-
     this.refresh();
-    this.tryStartOnlineMatch();
   }
 
   private bindRoomEvents(): void {
@@ -275,18 +268,15 @@ export class SelectScene extends Phaser.Scene {
       gm.room.events.on('roomState', () => {
         this.syncFromRoomState();
         this.refresh();
-        this.tryStartOnlineMatch();
       }),
       gm.room.events.on('presence', () => {
         this.syncFromRoomState();
         this.refresh();
-        this.tryStartOnlineMatch();
       }),
       gm.room.events.on('lobby', (msg) => {
         if (msg.playerId === 'p1') this.p1Selection = msg.character;
         if (msg.playerId === 'p2') this.p2Selection = msg.character;
         this.refresh();
-        this.tryStartOnlineMatch();
       }),
       gm.room.events.on('match', (msg) => {
         console.log('[MATCH MESSAGE RECEIVED]', msg);
@@ -324,50 +314,6 @@ export class SelectScene extends Phaser.Scene {
     return { p1Ready, p2Ready };
   }
 
-  private tryStartOnlineMatch(): void {
-    const gm = GameManager.getInstance();
-    if (this.launching || !gm.room.slot) return;
-
-    const roomState = gm.room.getRoomState();
-    const opponentSlot = gm.room.opponentSlot;
-    const opponentPlayer = opponentSlot ? roomState.players[opponentSlot] : null;
-    const opponentPresent = (opponentPlayer && opponentPlayer.connected) || (gm.room.lastSnapshot?.opponentPresent ?? false);
-    if (!opponentPresent) return;
-
-    const { p1Ready, p2Ready } = this.readyFlags();
-    const p1Character = this.p1Selection;
-    const p2Character = this.p2Selection;
-
-    console.log('[START CHECK]', {
-      slot: gm.room.slot,
-      p1Ready,
-      p2Ready,
-      p1Character,
-      p2Character
-    });
-
-    if (!p1Ready || !p2Ready) return;
-
-    console.log('[START_MATCH SEND]', {
-      sender: gm.room.slot,
-      p1Character,
-      p2Character
-    });
-
-    const message: MatchMessage = {
-      type: 'MATCH',
-      playerId: gm.room.slot,
-      timestamp: Date.now(),
-      kind: 'START_MATCH',
-      p1Character,
-      p2Character
-    };
-
-    gm.room.sendMatch(message);
-    this.time.delayedCall(300, () => gm.room.sendMatch(message));
-    this.launchMatch(p1Character, p2Character);
-  }
-
   private onMatchMessage(msg: MatchMessage): void {
     const gm = GameManager.getInstance();
     if (msg.kind === 'START_MATCH') {
@@ -379,7 +325,8 @@ export class SelectScene extends Phaser.Scene {
       return;
     }
 
-    if (msg.kind === 'ROUND_START' || msg.kind === 'TIMER') {
+    // The fight is already running (we lagged behind or reconnected) - catch up.
+    if (msg.kind === 'ROUND_START' || msg.kind === 'COUNTDOWN' || msg.kind === 'TIMER') {
       this.launchMatch(this.p1Selection, this.p2Selection);
     }
   }

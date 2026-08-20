@@ -1,0 +1,22 @@
+# Render.com blueprint for the HAND BRAWL Colyseus game server.
+#
+# One-time setup:
+#   1. https://dashboard.render.com  ->  New  ->  Blueprint
+#   2. Connect the shreyasonly/hand-brawl-online repository
+#   3. Render reads this file and creates the "hand-brawl-server" web service
+#
+# After the first deploy, Render redeploys the server automatically on every
+# git push - the same workflow Vercel already gives the frontend.
+#
+# NOTE: the free plan spins down after ~15 minutes of inactivity; the first
+# player to connect then waits ~30-60s while it cold-starts. Upgrade the plan
+# (or use any other Node host with websockets) if that bothers you.
+services:
+  - type: web
+    name: hand-brawl-server
+    runtime: node
+    plan: free
+    rootDir: server
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    healthCheckPath: /health

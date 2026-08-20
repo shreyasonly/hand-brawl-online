@@ -85,16 +85,27 @@ export interface LobbyMessage {
   cameraEnabled: boolean;
 }
 
-/** Match-flow events. PLAYER 1 is the match authority and emits these. */
+/**
+ * Match-flow events.
+ *
+ * ONLINE   : the Colyseus GAME SERVER is the only authority and emits these.
+ * PRACTICE : the local simulation emits them for itself.
+ */
 export type MatchMessageKind =
   | 'START_MATCH'
   | 'ROUND_START'
+  /** Server-paced 3 / 2 / 1 / FIGHT tick. */
+  | 'COUNTDOWN'
   | 'TIMER'
   | 'ROUND_END'
   | 'MATCH_END'
   | 'REMATCH_REQUEST'
   | 'REMATCH_ACCEPT'
-  /** Follower asking the authority to re-send the current round state. */
+  /** Server confirms both players want a rematch - restart the fight. */
+  | 'REMATCH_START'
+  /** Full snapshot for a client that reconnected or missed a packet. */
+  | 'ROUND_STATE'
+  /** Client asking the server to re-send the current round state. */
   | 'NEED_STATE';
 
 export interface MatchMessage {
@@ -110,6 +121,16 @@ export interface MatchMessage {
   p2Character?: CharacterId;
   p1Wins?: number;
   p2Wins?: number;
+  /** COUNTDOWN payload: '3' | '2' | '1' | 'FIGHT'. */
+  value?: string;
+  /** MATCH_END: 'OPPONENT_LEFT' when the other player abandoned the match. */
+  reason?: string;
+  /** ROUND_STATE extras. */
+  phase?: string;
+  p1Hp?: number;
+  p2Hp?: number;
+  roundActive?: boolean;
+  byTimeout?: boolean;
 }
 
 export type NetMessage =

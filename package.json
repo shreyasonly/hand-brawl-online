@@ -2,10 +2,12 @@
   "name": "hand-brawl",
   "private": true,
   "version": "2.0.0",
-  "description": "Online 2-player gesture fighting game. One laptop = one webcam = one player. Phaser + TensorFlow.js + MediaPipe Hands + Fingerpose + Supabase Realtime.",
+  "description": "Online 2-player gesture fighting game. One laptop = one webcam = one player. Phaser + TensorFlow.js + MediaPipe Hands + Fingerpose + Colyseus.",
   "type": "module",
   "scripts": {
     "dev": "vite --host 0.0.0.0",
+    "dev:client": "vite --host 0.0.0.0",
+    "dev:server": "npm --prefix server run dev",
     "build": "tsc && vite build",
     "preview": "vite preview --host 0.0.0.0",
     "typecheck": "tsc --noEmit",
@@ -14,6 +16,7 @@
     "test": "node tests/gestures.test.cjs && node tests/pinch.test.cjs"
   },
   "dependencies": {
+    "@colyseus/sdk": "^0.17.43",
     "@mediapipe/face_detection": "^0.4.1646425229",
     "@mediapipe/hands": "^0.4.1675469240",
     "@supabase/supabase-js": "^2.39.8",

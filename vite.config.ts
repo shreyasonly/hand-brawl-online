@@ -39,8 +39,7 @@ export default defineConfig(({ command }) => ({
             '@tensorflow/tfjs-backend-webgl',
             '@tensorflow-models/hand-pose-detection',
             '@tensorflow-models/face-detection'
-          ],
-          supabase: ['@supabase/supabase-js']
+          ]
         }
       }
     }
