@@ -174,9 +174,9 @@ export class GameRoom extends Room<{ state: GameState }> {
     const player = this.state.players.get(slot);
     if (!player) return;
 
-    // Pre-fight (lobby / camera setup / select): no grace period needed. Free
-    // the slot so someone can join again with the same code.
-    if (!this.isFightPhase()) {
+    // A lone room creator whose socket died: nothing to preserve, let the
+    // room dispose so the code can be reused.
+    if (this.state.phase === 'WAITING_FOR_PLAYER') {
       console.log(
         `[PLAYER LEFT] room=${this.state.roomCode} slot=${slot} dropped code=${code} phase=${this.state.phase}`
       );
@@ -184,11 +184,14 @@ export class GameRoom extends Room<{ state: GameState }> {
       return;
     }
 
-    // Mid-fight: hold the slot and give them a reconnect window.
+    // Everywhere else (lobby, select AND the fight): hold the slot and give
+    // them a reconnect window. A wifi blip during character select must not
+    // silently kill the session - that ends in "READY does nothing".
+    const wasInFight = this.isFightPhase();
     player.connected = false;
-    this.state.pausedForDisconnect = true;
+    if (wasInFight) this.state.pausedForDisconnect = true;
     console.log(
-      `[PLAYER DISCONNECTED] room=${this.state.roomCode} slot=${slot} code=${code} grace=${RECONNECT_GRACE_SECONDS}s`
+      `[PLAYER DISCONNECTED] room=${this.state.roomCode} slot=${slot} code=${code} phase=${this.state.phase} grace=${RECONNECT_GRACE_SECONDS}s`
     );
 
     try {
@@ -200,11 +203,17 @@ export class GameRoom extends Room<{ state: GameState }> {
       player.connected = true;
       this.refreshPauseFlag();
       console.log(`[PLAYER RECONNECTED] room=${this.state.roomCode} slot=${slot}`);
-      this.sendRoundState(reconnected);
+      if (this.isFightPhase()) {
+        this.sendRoundState(reconnected);
+      } else {
+        // Both may have readied up around the drop - re-evaluate.
+        this.tryStartMatch();
+      }
     } catch {
       console.log(`[RECONNECT WINDOW EXPIRED] room=${this.state.roomCode} slot=${slot}`);
+      const inFight = this.isFightPhase();
       this.removePlayer(client, slot);
-      if (this.state.players.size > 0) {
+      if (inFight && this.state.players.size > 0) {
         this.finishByAbandon(otherSlot(slot));
       }
     }

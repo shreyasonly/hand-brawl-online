@@ -220,7 +220,11 @@ export class SetupScene extends Phaser.Scene {
 
     if (gm.mode === 'ONLINE') {
       const opp = gm.room.opponentMeta;
-      if (!opp) {
+      if (gm.room.status === 'RECONNECTING') {
+        this.opponentText.setText('CONNECTION LOST - RECONNECTING TO THE GAME SERVER...');
+      } else if (gm.room.status === 'ERROR' || gm.room.status === 'OFFLINE') {
+        this.opponentText.setText('CONNECTION LOST - PRESS ESC AND CREATE / JOIN A NEW LOBBY');
+      } else if (!opp) {
         this.opponentText.setText('OPPONENT DISCONNECTED - WAITING...');
       } else {
         const cam = opp.cameraEnabled ? 'CAM ✓' : 'CAM --';

@@ -56,6 +56,7 @@ export class SelectScene extends Phaser.Scene {
     gm.currentState = GameState.CHARACTER_SELECT;
     this.localReady = false;
     this.launching = false;
+    this.launched = false;
 
     if (gm.mode === 'ONLINE') {
       const roomState = gm.room.getRoomState();
@@ -325,31 +326,47 @@ export class SelectScene extends Phaser.Scene {
       return;
     }
 
-    // The fight is already running (we lagged behind or reconnected) - catch up.
+    // The fight is already running (we lagged behind, were backgrounded, or
+    // reconnected) - skip the beauty delay and enter the FightScene NOW.
     if (msg.kind === 'ROUND_START' || msg.kind === 'COUNTDOWN' || msg.kind === 'TIMER') {
-      this.launchMatch(this.p1Selection, this.p2Selection);
+      this.launchMatch(this.p1Selection, this.p2Selection, true);
     }
   }
 
-  private launchMatch(p1: CharacterId, p2: CharacterId): void {
-    if (this.launching) return;
-    this.launching = true;
+  private launched = false;
 
-    const gm = GameManager.getInstance();
-    console.log('[LAUNCH MATCH]', {
-      slot: gm.room.slot,
-      p1,
-      p2
-    });
+  private launchMatch(p1: CharacterId, p2: CharacterId, immediate = false): void {
+    if (this.launched) return;
 
-    gm.p1Character = p1;
-    gm.p2Character = p2;
-    gm.resetMatch();
-    gm.room.setMatchState('COUNTDOWN');
+    if (!this.launching) {
+      this.launching = true;
 
-    this.statusText.setColor('#4dff9f');
-    this.statusText.setText(`${p1} VS ${p2} - GET READY!`);
-    this.time.delayedCall(700, () => this.scene.start('FightScene'));
+      const gm = GameManager.getInstance();
+      console.log('[LAUNCH MATCH]', {
+        slot: gm.room.slot,
+        p1,
+        p2
+      });
+
+      gm.p1Character = p1;
+      gm.p2Character = p2;
+      gm.resetMatch();
+      gm.room.setMatchState('COUNTDOWN');
+
+      this.statusText.setColor('#4dff9f');
+      this.statusText.setText(`${p1} VS ${p2} - GET READY!`);
+    }
+
+    // DOM timer, NOT this.time.delayedCall: Phaser's clock freezes in a
+    // background tab, and the fight must start even when this window isn't
+    // focused (websocket callbacks keep firing regardless).
+    const start = () => {
+      if (this.launched) return;
+      this.launched = true;
+      this.scene.start('FightScene');
+    };
+    if (immediate) start();
+    else window.setTimeout(start, 700);
   }
 
   private refresh(): void {
@@ -382,6 +399,18 @@ export class SelectScene extends Phaser.Scene {
     const opponentPlayer = opponentSlot ? roomState.players[opponentSlot] : null;
     const opponentPresent = (opponentPlayer && opponentPlayer.connected) || (gm.room.lastSnapshot?.opponentPresent ?? false);
     const opponentReady = gm.localIndex === 1 ? p2Ready : p1Ready;
+
+    // OUR socket has problems - say so instead of silently eating clicks.
+    if (gm.room.status === 'RECONNECTING') {
+      this.statusText.setColor('#ff5f7a');
+      this.statusText.setText('CONNECTION LOST - RECONNECTING TO THE GAME SERVER...');
+      return;
+    }
+    if (gm.room.status === 'ERROR' || gm.room.status === 'OFFLINE') {
+      this.statusText.setColor('#ff5f7a');
+      this.statusText.setText('CONNECTION TO THE GAME SERVER WAS LOST\nPRESS ESC AND CREATE / JOIN A NEW LOBBY');
+      return;
+    }
 
     if (!opponentPresent) {
       this.statusText.setColor('#ff5f7a');

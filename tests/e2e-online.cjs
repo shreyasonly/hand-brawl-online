@@ -114,6 +114,21 @@ async function activeScene(page, name, timeoutMs, who) {
   await activeScene(p1, 'SelectScene', 10000, 'P1');
   await activeScene(p2, 'SelectScene', 10000, 'P2');
 
+  // -------------------------------------------------- LOBBY SOCKET BLIP
+  // A wifi hiccup during character select must NOT kill the session: the
+  // server holds the slot and the client auto-reconnects.
+  console.log('== LOBBY SOCKET BLIP (drop + auto-reconnect before READY) ==');
+  await p2.evaluate(() => {
+    window.__HB.gm().room.room.leave(false); // raw close, no consent
+  });
+  await waitFor(
+    p2,
+    () => window.__HB.gm().room.status === 'CONNECTED' && window.__HB.gm().room.slot === 'p2',
+    25000,
+    'P2: auto-reconnect in lobby'
+  );
+  ok('P2 dropped in the lobby and auto-reconnected, slot kept');
+
   // -------------------------------------------------- READY x2 -> FIGHT
   console.log('== READY -> COUNTDOWN -> FIGHT ==');
   await p1.keyboard.press('Enter'); // P1 READY

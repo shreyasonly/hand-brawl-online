@@ -544,6 +544,23 @@ export class GameServerSession {
     const sp1 = state.players.get('p1');
     const sp2 = state.players.get('p2');
 
+    // Belt-and-braces: if the dedicated 'slot' message was ever missed, the
+    // replicated state still tells us which player we are.
+    if (!this.slot && this.room) {
+      const mine =
+        sp1?.sessionId === this.room.sessionId ? sp1 :
+        sp2?.sessionId === this.room.sessionId ? sp2 : undefined;
+      if (mine) {
+        console.log('[PLAYER ASSIGNED] (derived from state)', mine.slot);
+        this.slot = mine.slot;
+        this.meta.slot = mine.slot;
+        if (!this.characterPickedByPlayer) {
+          this.meta.character = mine.slot === 'p1' ? 'JACK' : 'KIRA';
+        }
+        this.events.emit('slot', mine.slot);
+      }
+    }
+
     this.roomState.players.p1 = sp1
       ? {
           slot: 'p1',

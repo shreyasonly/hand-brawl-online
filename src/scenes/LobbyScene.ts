@@ -222,7 +222,9 @@ export class LobbyScene extends Phaser.Scene {
   private advance(): void {
     if (this.advanced) return;
     this.advanced = true;
-    this.time.delayedCall(900, () => this.scene.start('SetupScene'));
+    // DOM timer, NOT this.time.delayedCall: Phaser's clock freezes in a
+    // background tab and this transition must happen anyway.
+    window.setTimeout(() => this.scene.start('SetupScene'), 900);
   }
 
   private async copyCode(): Promise<void> {
